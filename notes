@@ -1,0 +1,1 @@
+certutil -d sql:$HOME/.mozilla/firefox/9zrukl1a.osmosis -A -n osmosis -t C < ca.crt
