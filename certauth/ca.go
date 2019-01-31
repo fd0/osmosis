@@ -146,6 +146,11 @@ func (ca *CertificateAuthority) Save(certfile, keyfile string) error {
 	return nil
 }
 
+// CertificateAsPEM returns the CA certificate encoded as PEM.
+func (ca *CertificateAuthority) CertificateAsPEM() []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Certificate.Raw})
+}
+
 // NewCertificate creates a new certificate for the given host name or IP address.
 func (ca *CertificateAuthority) NewCertificate(commonName string, names []string) (*x509.Certificate, error) {
 	// generate random 64 bit serial
