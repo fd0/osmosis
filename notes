@@ -1,1 +1,4 @@
 certutil -d sql:$HOME/.mozilla/firefox/9zrukl1a.osmosis -A -n osmosis -t C < ca.crt
+certutil -d sql:$HOME/.mozilla/firefox/9zrukl1a.osmosis -D -n osmosis
+
+https://websocketstest.com/

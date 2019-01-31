@@ -22,8 +22,6 @@ type CertificateAuthority struct {
 // NewCA creates a new certificate authority.
 func NewCA() (*CertificateAuthority, error) {
 	// adapter from https://golang.org/src/crypto/tls/generate_cert.go
-	fmt.Printf("generating new CA\n")
-
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
