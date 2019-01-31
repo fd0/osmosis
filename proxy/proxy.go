@@ -288,6 +288,12 @@ func (p *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// serve certificate for easier importing
+	if req.URL.Hostname() == "proxy" && req.URL.Path == "/ca" {
+		p.ServeCA(res, req)
+		return
+	}
+
 	// handle all other requests
 	headerWritten, err := p.ServeHTTPProxy(res, req, "", "")
 	if err != nil {
@@ -299,6 +305,13 @@ func (p *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			fmt.Fprintf(res, "error: %v\n", err)
 		}
 	}
+}
+
+// ServeCA returns the PEM encoded CA certificate.
+func (p *Proxy) ServeCA(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	res.WriteHeader(http.StatusOK)
+	res.Write(p.ca.CertificateAsPEM())
 }
 
 // Serve runs the proxy and answers requests.
