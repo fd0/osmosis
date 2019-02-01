@@ -108,6 +108,9 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 		return nil, err
 	}
 
+	// use Host header from received request
+	req.Host = proxyRequest.Host
+
 	for name, values := range proxyRequest.Header {
 		if _, ok := filterHeaders[strings.ToLower(name)]; ok {
 			// header is filtered, do not send it to the upstream server
