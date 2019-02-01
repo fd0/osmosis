@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -118,16 +117,18 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 	return req, nil
 }
 
-// ServeHTTPProxy is called for each request the proxy receives.
-func (p *Proxy) ServeHTTPProxy(res http.ResponseWriter, req *http.Request, forceHost, forceScheme string) (headerWritten bool, err error) {
+// ServeProxyRequest is called for each request the proxy receives.
+func (p *Proxy) ServeProxyRequest(res http.ResponseWriter, req *http.Request, forceHost, forceScheme string) {
 	clientRequest, err := prepareRequest(req, forceHost, forceScheme)
 	if err != nil {
-		return false, err
+		p.sendError(res, "error preparing request: %v", err)
+		return
 	}
 
 	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
 	if err != nil {
-		return false, fmt.Errorf("error executing request: %v", err)
+		p.sendError(res, "error executing request: %v", err)
+		return
 	}
 
 	p.logger.Printf("%v %v -> %v", req.Method, req.URL, response.Status)
@@ -141,15 +142,15 @@ func (p *Proxy) ServeHTTPProxy(res http.ResponseWriter, req *http.Request, force
 
 	_, err = io.Copy(res, response.Body)
 	if err != nil {
-		return true, fmt.Errorf("error copying body: %v", err)
+		p.logger.Printf("error copying body: %v", err)
+		return
 	}
 
 	err = response.Body.Close()
 	if err != nil {
-		return true, fmt.Errorf("error closing body: %v", err)
+		p.logger.Printf("error closing body: %v", err)
+		return
 	}
-
-	return true, nil
 }
 
 func writeConnectSuccess(wr io.Writer) error {
@@ -202,20 +203,28 @@ func (l *tlsListener) Addr() net.Addr {
 	return l.addr
 }
 
+func (p *Proxy) sendError(res http.ResponseWriter, msg string, args ...interface{}) {
+	p.logger.Printf(msg, args...)
+	res.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprintf(res, msg, args...)
+}
+
 // HandleConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
-func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Request) error {
+func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Request) {
 	p.logger.Printf("CONNECT %v from %v", req.URL.Host, req.RemoteAddr)
 	forceHost := req.URL.Host
 
 	hj, ok := responseWriter.(http.Hijacker)
 	if !ok {
-		return errors.New("responseWriter is not a hijacker")
+		p.sendError(responseWriter, "unable to reuse connection for CONNECT")
+		return
 	}
 
 	conn, _, err := hj.Hijack()
 	if err != nil {
-		return err
+		p.sendError(responseWriter, "reusing connection failed: %v", err)
+		return
 	}
 	defer conn.Close()
 
@@ -223,7 +232,7 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 	if err != nil {
 		p.logger.Printf("unable to write proxy response: %v", err)
 		writeConnectError(conn, err)
-		return nil
+		return
 	}
 
 	tlsConn := tls.Server(conn, p.serverConfig)
@@ -232,7 +241,7 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 	err = tlsConn.Handshake()
 	if err != nil {
 		p.logger.Printf("TLS handshake for %v failed: %v", req.URL.Host, err)
-		return nil
+		return
 	}
 
 	p.logger.Printf("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
@@ -240,16 +249,7 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 	srv := &http.Server{
 		ErrorLog: p.logger,
 		Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
-			headerWritten, err := p.ServeHTTPProxy(res, req, forceHost, "https")
-			if err != nil {
-				p.logger.Printf("unable to prepare client request %v: %v", req.URL, err)
-				if !headerWritten {
-					// if we havn't written the response yet, inform the user if possible
-					res.Header().Set("Content-Type", "text/plain; charset=utf-8")
-					res.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprintf(res, "error: %v\n", err)
-				}
-			}
+			p.ServeProxyRequest(res, req, forceHost, "https")
 		}),
 	}
 
@@ -259,7 +259,6 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 	}
 	listener.ch <- tlsConn
 	err = srv.Serve(listener)
-	return nil
 }
 
 func dumpResponse(res *http.Response) {
@@ -279,12 +278,7 @@ func dumpRequest(req *http.Request) {
 func (p *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {
-		err := p.HandleConnect(res, req)
-		if err != nil {
-			p.logger.Printf("%v", err)
-			res.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(res, "%v", err)
-		}
+		p.HandleConnect(res, req)
 		return
 	}
 
@@ -295,16 +289,7 @@ func (p *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 
 	// handle all other requests
-	headerWritten, err := p.ServeHTTPProxy(res, req, "", "")
-	if err != nil {
-		p.logger.Printf("unable to prepare client request %v: %v", req.URL, err)
-		if !headerWritten {
-			// if we havn't written the response yet, inform the user if possible
-			res.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			res.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(res, "error: %v\n", err)
-		}
-	}
+	p.ServeProxyRequest(res, req, "", "")
 }
 
 // ServeCA returns the PEM encoded CA certificate.
