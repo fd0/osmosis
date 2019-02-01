@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -181,12 +182,12 @@ func writeConnectError(wr io.WriteCloser, err error) {
 	wr.Close()
 }
 
-type tlsListener struct {
-	ch   chan *tls.Conn
+type fakeListener struct {
+	ch   chan net.Conn
 	addr net.Addr
 }
 
-func (l *tlsListener) Accept() (net.Conn, error) {
+func (l *fakeListener) Accept() (net.Conn, error) {
 	conn, ok := <-l.ch
 	if !ok {
 		return nil, nil
@@ -194,12 +195,12 @@ func (l *tlsListener) Accept() (net.Conn, error) {
 	return conn, nil
 }
 
-func (l *tlsListener) Close() error {
+func (l *fakeListener) Close() error {
 	close(l.ch)
 	return nil
 }
 
-func (l *tlsListener) Addr() net.Addr {
+func (l *fakeListener) Addr() net.Addr {
 	return l.addr
 }
 
@@ -207,6 +208,15 @@ func (p *Proxy) sendError(res http.ResponseWriter, msg string, args ...interface
 	p.logger.Printf(msg, args...)
 	res.WriteHeader(http.StatusInternalServerError)
 	fmt.Fprintf(res, msg, args...)
+}
+
+type buffConn struct {
+	*bufio.Reader
+	net.Conn
+}
+
+func (b buffConn) Read(p []byte) (int, error) {
+	return b.Reader.Read(p)
 }
 
 // HandleConnect makes a connection to a target host and forwards all packets.
@@ -235,30 +245,66 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 		return
 	}
 
-	tlsConn := tls.Server(conn, p.serverConfig)
-	defer tlsConn.Close()
+	// try to find out if the client tries to setup TLS
+	bconn := buffConn{
+		Reader: bufio.NewReader(conn),
+		Conn:   conn,
+	}
 
-	err = tlsConn.Handshake()
+	buf, err := bconn.Peek(1)
 	if err != nil {
-		p.logger.Printf("TLS handshake for %v failed: %v", req.URL.Host, err)
+		p.logger.Printf("peek(1) failed: %v", err)
 		return
 	}
 
-	p.logger.Printf("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
-
-	srv := &http.Server{
-		ErrorLog: p.logger,
-		Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
-			p.ServeProxyRequest(res, req, forceHost, "https")
-		}),
-	}
-
-	listener := &tlsListener{
-		ch:   make(chan *tls.Conn, 1),
+	listener := &fakeListener{
+		ch:   make(chan net.Conn, 1),
 		addr: conn.RemoteAddr(),
 	}
-	listener.ch <- tlsConn
+
+	var srv *http.Server
+
+	// TLS client hello starts with 0x16
+	if buf[0] == 0x16 {
+		tlsConn := tls.Server(bconn, p.serverConfig)
+		defer tlsConn.Close()
+
+		err = tlsConn.Handshake()
+		if err != nil {
+			p.logger.Printf("TLS handshake for %v failed: %v", req.URL.Host, err)
+			return
+		}
+
+		p.logger.Printf("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
+
+		listener.ch <- tlsConn
+
+		// handle the next requests as HTTPS
+		srv = &http.Server{
+			ErrorLog: p.logger,
+			Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+				// send all requests to the host we were told to connect to
+				p.ServeProxyRequest(res, req, forceHost, "https")
+			}),
+		}
+	} else {
+		listener.ch <- bconn
+
+		// handle the next requests as HTTP
+		srv = &http.Server{
+			ErrorLog: p.logger,
+			Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+				// send all requests to the host we were told to connect to
+				p.ServeProxyRequest(res, req, forceHost, "http")
+			}),
+		}
+	}
+
+	// handle all incoming requests
 	err = srv.Serve(listener)
+	if err != nil {
+		p.logger.Printf("error serving TLS connection: %v", err)
+	}
 }
 
 func dumpResponse(res *http.Response) {
