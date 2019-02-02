@@ -28,7 +28,7 @@ func NewCA() (*CertificateAuthority, error) {
 	}
 
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(23),
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
 		Subject: pkix.Name{
 			Organization: []string{"Osmosis Interception Proxy CA"},
 		},
