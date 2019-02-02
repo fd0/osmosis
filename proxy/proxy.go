@@ -344,6 +344,10 @@ func (p *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 // ServeCA returns the PEM encoded CA certificate.
 func (p *Proxy) ServeCA(res http.ResponseWriter, req *http.Request) {
 	res.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	res.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	res.Header().Set("Pragma", "no-cache")
+	res.Header().Set("Expires", "0")
+
 	res.WriteHeader(http.StatusOK)
 	res.Write(p.ca.CertificateAsPEM())
 }
