@@ -2,3 +2,4 @@ certutil -d sql:$HOME/.mozilla/firefox/9zrukl1a.osmosis -A -n osmosis -t C < ca.
 certutil -d sql:$HOME/.mozilla/firefox/9zrukl1a.osmosis -D -n osmosis
 
 https://websocketstest.com/
+curl --tls-max 1.2 -I https://tls13.crypto.mozilla.org:443

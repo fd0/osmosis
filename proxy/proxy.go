@@ -16,17 +16,46 @@ import (
 	"github.com/happal/osmosis/certauth"
 	"golang.org/x/net/context/ctxhttp"
 	"golang.org/x/net/http2"
+	"golang.org/x/sync/errgroup"
 )
 
 // Proxy allows intercepting and modifying requests.
 type Proxy struct {
 	server       *http.Server
-	client       *http.Client
-	logger       *log.Logger
 	serverConfig *tls.Config
-	clientConfig *tls.Config
+
+	client   *http.Client
+	wsClient *http.Client
+
+	logger *log.Logger
 
 	ca *certauth.CertificateAuthority
+}
+
+func newHTTPClient(enableHTTP2 bool) *http.Client {
+	// initialize HTTP client
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		Dial: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).Dial,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       15 * time.Second,
+	}
+
+	if enableHTTP2 {
+		http2.ConfigureTransport(tr)
+	}
+
+	return &http.Client{
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // New initializes a proxy.
@@ -62,29 +91,8 @@ func New(address string, ca *certauth.CertificateAuthority) *Proxy {
 		Handler:  proxy,
 	}
 
-	// initialize HTTP client
-	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		Dial: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).Dial,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		IdleConnTimeout:       15 * time.Second,
-		TLSClientConfig:       proxy.clientConfig,
-	}
-
-	// enable http2
-	http2.ConfigureTransport(tr)
-
-	proxy.client = &http.Client{
-		Transport: tr,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	proxy.client = newHTTPClient(true)
+	proxy.wsClient = newHTTPClient(false)
 
 	return proxy
 }
@@ -121,27 +129,60 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 	return req, nil
 }
 
+// isWebsocketHandshake returns true if the request tries to initiate a websocket handshake.
+func isWebsocketHandshake(req *http.Request) bool {
+	upgrade := strings.ToLower(req.Header.Get("upgrade"))
+	return strings.Contains(upgrade, "websocket")
+}
+
+func copyHeader(dst, src http.Header) {
+	for name, values := range src {
+		for _, value := range values {
+			dst.Add(name, value)
+		}
+	}
+}
+
 // ServeProxyRequest is called for each request the proxy receives.
 func (p *Proxy) ServeProxyRequest(res http.ResponseWriter, req *http.Request, forceHost, forceScheme string) {
+	p.logger.Printf("%v %v", req.Method, req.URL)
 	clientRequest, err := prepareRequest(req, forceHost, forceScheme)
 	if err != nil {
 		p.sendError(res, "error preparing request: %v", err)
 		return
 	}
 
-	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
+	client := p.client
+	if isWebsocketHandshake(req) {
+		// use the special HTTP client which does not have http2 enabled
+		client = p.wsClient
+
+		// put back the "connection" header
+		clientRequest.Header.Set("Connection", "upgrade")
+
+		p.logger.Printf("request is websocket upgrade")
+		dumpRequest(req)
+		dumpRequest(clientRequest)
+	}
+
+	response, err := ctxhttp.Do(req.Context(), client, clientRequest)
 	if err != nil {
 		p.sendError(res, "error executing request: %v", err)
 		return
 	}
 
-	p.logger.Printf("%v %v -> %v", req.Method, req.URL, response.Status)
-
-	// copy header
-	for name, values := range response.Header {
-		res.Header()[name] = values
+	if isWebsocketHandshake(req) {
+		dumpResponse(response)
 	}
 
+	p.logger.Printf("%v %v -> %v", req.Method, req.URL, response.Status)
+
+	if response.StatusCode == http.StatusSwitchingProtocols {
+		p.HandleUpgradeResponse(req, response, res)
+		return
+	}
+
+	copyHeader(res.Header(), response.Header)
 	res.WriteHeader(response.StatusCode)
 
 	_, err = io.Copy(res, response.Body)
@@ -154,6 +195,82 @@ func (p *Proxy) ServeProxyRequest(res http.ResponseWriter, req *http.Request, fo
 	if err != nil {
 		p.logger.Printf("error closing body: %v", err)
 		return
+	}
+}
+
+func copyUntilError(src, dst io.ReadWriteCloser) error {
+	var g errgroup.Group
+	g.Go(func() error {
+		_, err := io.Copy(src, dst)
+		return err
+	})
+
+	g.Go(func() error {
+		_, err := io.Copy(dst, src)
+		return err
+	})
+
+	return g.Wait()
+}
+
+// HandleUpgradeResponse handles an upgraded connection (e.g. websockets).
+func (p *Proxy) HandleUpgradeResponse(req *http.Request, res *http.Response, rw http.ResponseWriter) {
+	reqUpgrade := req.Header.Get("upgrade")
+	resUpgrade := req.Header.Get("upgrade")
+	p.logger.Printf("detected protocol switch, %v -> %v", reqUpgrade, resUpgrade)
+
+	if reqUpgrade != resUpgrade {
+		p.sendError(rw, "upgrade protocols do not match, request %q, response %q", reqUpgrade, resUpgrade)
+		req.Body.Close()
+		res.Body.Close()
+		return
+	}
+
+	hj, ok := rw.(http.Hijacker)
+	if !ok {
+		p.sendError(rw, "switching protocols failed, incoming connection is not bidirectional")
+		req.Body.Close()
+		res.Body.Close()
+		return
+	}
+
+	clientConn, clientRW, err := hj.Hijack()
+	if !ok {
+		p.sendError(rw, "switching protocols failed, hijacking outgoing connection failed: %v", err)
+		req.Body.Close()
+		res.Body.Close()
+		return
+	}
+	defer clientConn.Close()
+
+	outgoingConn, ok := res.Body.(io.ReadWriteCloser)
+	if !ok {
+		p.logger.Printf("switching protocols failed, outgoing connection is not bidirectional")
+		p.logger.Printf("body %#v", req.Body)
+		res.Body.Close()
+		return
+	}
+	defer outgoingConn.Close()
+
+	// write the response to the original client, not sending any body, which
+	// is connected to the client directly later.
+	res.Body = nil
+	err = res.Write(clientConn)
+	if err != nil {
+		p.logger.Printf("writing the received header failed")
+		return
+	}
+
+	// send the header and flush data that should be sent to the client
+	err = clientRW.Flush()
+	if err != nil {
+		p.logger.Printf("flushing data to the client failed")
+		return
+	}
+
+	err = copyUntilError(outgoingConn, clientConn)
+	if err != nil {
+		p.logger.Printf("copying data for websocket returned error: %v", err)
 	}
 }
 
@@ -209,6 +326,7 @@ func (l *fakeListener) Addr() net.Addr {
 
 func (p *Proxy) sendError(res http.ResponseWriter, msg string, args ...interface{}) {
 	p.logger.Printf(msg, args...)
+	res.Header().Set("Content-Type", "text/plain")
 	res.WriteHeader(http.StatusInternalServerError)
 	fmt.Fprintf(res, msg, args...)
 }
@@ -234,12 +352,14 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 		return
 	}
 
-	conn, _, err := hj.Hijack()
+	conn, rw, err := hj.Hijack()
 	if err != nil {
 		p.sendError(responseWriter, "reusing connection failed: %v", err)
 		return
 	}
 	defer conn.Close()
+
+	rw.Flush()
 
 	err = writeConnectSuccess(conn)
 	if err != nil {
@@ -278,7 +398,7 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 			return
 		}
 
-		p.logger.Printf("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
+		// p.logger.Printf("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
 
 		listener.ch <- tlsConn
 
@@ -311,16 +431,18 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 }
 
 func dumpResponse(res *http.Response) {
-	buf, err := httputil.DumpResponse(res, false)
+	buf, err := httputil.DumpResponse(res, true)
 	if err == nil {
 		fmt.Printf("--------------\n%s\n--------------\n", buf)
+		fmt.Printf("body: %#v\n", res.Body)
 	}
 }
 
 func dumpRequest(req *http.Request) {
-	buf, err := httputil.DumpRequest(req, false)
+	buf, err := httputil.DumpRequest(req, true)
 	if err == nil {
 		fmt.Printf("--------------\n%s\n--------------\n", buf)
+		fmt.Printf("body: %#v\n", req.Body)
 	}
 }
 
