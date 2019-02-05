@@ -24,8 +24,7 @@ type Proxy struct {
 	server       *http.Server
 	serverConfig *tls.Config
 
-	client   *http.Client
-	wsClient *http.Client
+	client *http.Client
 
 	logger *log.Logger
 
@@ -92,7 +91,6 @@ func New(address string, ca *certauth.CertificateAuthority) *Proxy {
 	}
 
 	proxy.client = newHTTPClient(true)
-	proxy.wsClient = newHTTPClient(false)
 
 	return proxy
 }
@@ -146,26 +144,18 @@ func copyHeader(dst, src http.Header) {
 // ServeProxyRequest is called for each request the proxy receives.
 func (p *Proxy) ServeProxyRequest(res http.ResponseWriter, req *http.Request, forceHost, forceScheme string) {
 	p.logger.Printf("%v %v", req.Method, req.URL)
+	if isWebsocketHandshake(req) {
+		p.HandleUpgradeRequest(req, res, forceHost, forceScheme)
+		return
+	}
+
 	clientRequest, err := prepareRequest(req, forceHost, forceScheme)
 	if err != nil {
 		p.sendError(res, "error preparing request: %v", err)
 		return
 	}
 
-	client := p.client
-	if isWebsocketHandshake(req) {
-		// use the special HTTP client which does not have http2 enabled
-		client = p.wsClient
-
-		// put back the "connection" header
-		clientRequest.Header.Set("Connection", "upgrade")
-
-		p.logger.Printf("request is websocket upgrade")
-		dumpRequest(req)
-		dumpRequest(clientRequest)
-	}
-
-	response, err := ctxhttp.Do(req.Context(), client, clientRequest)
+	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
 	if err != nil {
 		p.sendError(res, "error executing request: %v", err)
 		return
@@ -176,11 +166,6 @@ func (p *Proxy) ServeProxyRequest(res http.ResponseWriter, req *http.Request, fo
 	}
 
 	p.logger.Printf("%v %v -> %v", req.Method, req.URL, response.Status)
-
-	if response.StatusCode == http.StatusSwitchingProtocols {
-		p.HandleUpgradeResponse(req, response, res)
-		return
-	}
 
 	copyHeader(res.Header(), response.Header)
 	res.WriteHeader(response.StatusCode)
@@ -202,76 +187,114 @@ func copyUntilError(src, dst io.ReadWriteCloser) error {
 	var g errgroup.Group
 	g.Go(func() error {
 		_, err := io.Copy(src, dst)
+		fmt.Printf("end one closed: %v\n", err)
+		src.Close()
+		dst.Close()
 		return err
 	})
 
 	g.Go(func() error {
 		_, err := io.Copy(dst, src)
+		fmt.Printf("end two closed: %v\n", err)
+		src.Close()
+		dst.Close()
 		return err
 	})
 
 	return g.Wait()
 }
 
-// HandleUpgradeResponse handles an upgraded connection (e.g. websockets).
-func (p *Proxy) HandleUpgradeResponse(req *http.Request, res *http.Response, rw http.ResponseWriter) {
+// HandleUpgradeRequest handles an upgraded connection (e.g. websockets).
+func (p *Proxy) HandleUpgradeRequest(req *http.Request, rw http.ResponseWriter, forceHost, forceScheme string) {
 	reqUpgrade := req.Header.Get("upgrade")
-	resUpgrade := req.Header.Get("upgrade")
-	p.logger.Printf("detected protocol switch, %v -> %v", reqUpgrade, resUpgrade)
+	p.logger.Printf("received upgrade request for %v", reqUpgrade)
 
-	if reqUpgrade != resUpgrade {
-		p.sendError(rw, "upgrade protocols do not match, request %q, response %q", reqUpgrade, resUpgrade)
+	host := req.URL.Host
+	if forceHost != "" {
+		host = forceHost
+	}
+
+	scheme := req.URL.Scheme
+	if forceHost != "" {
+		scheme = forceScheme
+	}
+
+	var outgoingConn net.Conn
+	var err error
+
+	if scheme == "https" {
+		outgoingConn, err = tls.Dial("tcp", host, nil)
+	} else {
+		outgoingConn, err = net.Dial("tcp", host)
+	}
+
+	if err != nil {
+		p.sendError(rw, "connecting to %v failed: %v", host, err)
 		req.Body.Close()
-		res.Body.Close()
 		return
 	}
+
+	defer outgoingConn.Close()
+
+	p.logger.Printf("connected to %v", host)
+
+	outReq, err := prepareRequest(req, host, scheme)
+	if err != nil {
+		p.sendError(rw, "preparing request to %v failed: %v", host, err)
+		req.Body.Close()
+		return
+	}
+
+	// put back the "Connection" header
+	outReq.Header.Set("connection", req.Header.Get("connection"))
+
+	dumpRequest(req)
+	dumpRequest(outReq)
+
+	err = outReq.Write(outgoingConn)
+	if err != nil {
+		p.sendError(rw, "unable to forward request to %v: %v", host, err)
+		req.Body.Close()
+		return
+	}
+
+	outgoingReader := bufio.NewReader(outgoingConn)
+	outRes, err := http.ReadResponse(outgoingReader, outReq)
+	if err != nil {
+		p.sendError(rw, "unable to read response from %v: %v", host, err)
+		req.Body.Close()
+		return
+	}
+
+	dumpResponse(outRes)
 
 	hj, ok := rw.(http.Hijacker)
 	if !ok {
 		p.sendError(rw, "switching protocols failed, incoming connection is not bidirectional")
 		req.Body.Close()
-		res.Body.Close()
 		return
 	}
 
-	clientConn, clientRW, err := hj.Hijack()
+	clientConn, _, err := hj.Hijack()
 	if !ok {
-		p.sendError(rw, "switching protocols failed, hijacking outgoing connection failed: %v", err)
+		p.sendError(rw, "switching protocols failed, hijacking incoming connection failed: %v", err)
 		req.Body.Close()
-		res.Body.Close()
 		return
 	}
 	defer clientConn.Close()
 
-	outgoingConn, ok := res.Body.(io.ReadWriteCloser)
-	if !ok {
-		p.logger.Printf("switching protocols failed, outgoing connection is not bidirectional")
-		p.logger.Printf("body %#v", req.Body)
-		res.Body.Close()
-		return
-	}
-	defer outgoingConn.Close()
-
-	// write the response to the original client, not sending any body, which
-	// is connected to the client directly later.
-	res.Body = nil
-	err = res.Write(clientConn)
+	err = outRes.Write(clientConn)
 	if err != nil {
-		p.logger.Printf("writing the received header failed")
+		p.logger.Printf("writing response to client failed: %v", err)
 		return
 	}
 
-	// send the header and flush data that should be sent to the client
-	err = clientRW.Flush()
-	if err != nil {
-		p.logger.Printf("flushing data to the client failed")
-		return
-	}
-
+	p.logger.Printf("start forwarding data")
 	err = copyUntilError(outgoingConn, clientConn)
 	if err != nil {
 		p.logger.Printf("copying data for websocket returned error: %v", err)
 	}
+	p.logger.Printf("connection done")
 }
 
 func writeConnectSuccess(wr io.Writer) error {
@@ -434,7 +457,7 @@ func dumpResponse(res *http.Response) {
 	buf, err := httputil.DumpResponse(res, true)
 	if err == nil {
 		fmt.Printf("--------------\n%s\n--------------\n", buf)
-		fmt.Printf("body: %#v\n", res.Body)
+		// fmt.Printf("body: %#v\n", res.Body)
 	}
 }
 
@@ -442,7 +465,7 @@ func dumpRequest(req *http.Request) {
 	buf, err := httputil.DumpRequest(req, true)
 	if err == nil {
 		fmt.Printf("--------------\n%s\n--------------\n", buf)
-		fmt.Printf("body: %#v\n", req.Body)
+		// fmt.Printf("body: %#v\n", req.Body)
 	}
 }
 
