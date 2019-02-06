@@ -154,9 +154,13 @@ func isWebsocketHandshake(req *http.Request) bool {
 	return strings.Contains(upgrade, "websocket")
 }
 
-func copyHeader(dst, src http.Header) {
+func copyHeader(dst, src, trailer http.Header) {
 	for name, values := range src {
 		for _, value := range values {
+			// ignore the field if it should be a trailer
+			if _, ok := trailer[name]; ok {
+				continue
+			}
 			dst.Add(name, value)
 		}
 	}
@@ -185,7 +189,18 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 
 	req.Log("   -> %v", response.Status)
 
-	copyHeader(req.ResponseWriter.Header(), response.Header)
+	copyHeader(req.ResponseWriter.Header(), response.Header, response.Trailer)
+	if len(response.Trailer) > 0 {
+		req.Log("trailer detected, announcing: %v", response.Trailer)
+		names := make([]string, 0, len(response.Trailer))
+		for name := range response.Trailer {
+			names = append(names, name)
+		}
+
+		// announce the trailers to the client
+		req.ResponseWriter.Header().Set("Trailer", strings.Join(names, ", "))
+	}
+
 	req.ResponseWriter.WriteHeader(response.StatusCode)
 
 	_, err = io.Copy(req.ResponseWriter, response.Body)
@@ -198,6 +213,13 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 	if err != nil {
 		req.Log("error closing body: %v", err)
 		return
+	}
+
+	// send the trailer values
+	for name, values := range response.Trailer {
+		for _, value := range values {
+			req.ResponseWriter.Header().Set(name, value)
+		}
 	}
 }
 
