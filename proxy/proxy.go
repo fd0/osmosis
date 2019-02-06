@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/happal/osmosis/certauth"
@@ -24,6 +26,8 @@ type Proxy struct {
 	server       *http.Server
 	serverConfig *tls.Config
 
+	requestID uint64
+
 	client *http.Client
 
 	logger *log.Logger
@@ -31,7 +35,7 @@ type Proxy struct {
 	ca *certauth.CertificateAuthority
 }
 
-func newHTTPClient(enableHTTP2 bool) *http.Client {
+func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 	// initialize HTTP client
 	tr := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -43,6 +47,7 @@ func newHTTPClient(enableHTTP2 bool) *http.Client {
 		ResponseHeaderTimeout: 10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		IdleConnTimeout:       15 * time.Second,
+		TLSClientConfig:       cfg,
 	}
 
 	if enableHTTP2 {
@@ -58,9 +63,9 @@ func newHTTPClient(enableHTTP2 bool) *http.Client {
 }
 
 // New initializes a proxy.
-func New(address string, ca *certauth.CertificateAuthority) *Proxy {
+func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config) *Proxy {
 	proxy := &Proxy{
-		logger: log.New(os.Stdout, "server: ", 0),
+		logger: log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds),
 		ca:     ca,
 	}
 	proxy.serverConfig = &tls.Config{
@@ -90,7 +95,7 @@ func New(address string, ca *certauth.CertificateAuthority) *Proxy {
 		Handler:  proxy,
 	}
 
-	proxy.client = newHTTPClient(true)
+	proxy.client = newHTTPClient(true, clientConfig)
 
 	return proxy
 }
@@ -100,6 +105,15 @@ func New(address string, ca *certauth.CertificateAuthority) *Proxy {
 var filterHeaders = map[string]struct{}{
 	"proxy-connection": struct{}{},
 	"connection":       struct{}{},
+}
+
+// renameHeaders contains a list of header names which must be have a special
+// (mixed-case)representation, which is normalized away by default by the Go
+// http.Header struct.
+var renameHeaders = map[string]string{
+	"sec-websocket-key":      "Sec-WebSocket-Key",
+	"sec-websocket-version":  "Sec-WebSocket-Version",
+	"sec-websocket-protocol": "Sec-WebSocket-Protocol",
 }
 
 func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Request, error) {
@@ -122,6 +136,10 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 			// header is filtered, do not send it to the upstream server
 			continue
 		}
+
+		if newname, ok := renameHeaders[strings.ToLower(name)]; ok {
+			name = newname
+		}
 		req.Header[name] = values
 	}
 	return req, nil
@@ -142,43 +160,40 @@ func copyHeader(dst, src http.Header) {
 }
 
 // ServeProxyRequest is called for each request the proxy receives.
-func (p *Proxy) ServeProxyRequest(res http.ResponseWriter, req *http.Request, forceHost, forceScheme string) {
-	p.logger.Printf("%v %v", req.Method, req.URL)
-	if isWebsocketHandshake(req) {
-		p.HandleUpgradeRequest(req, res, forceHost, forceScheme)
+func (p *Proxy) ServeProxyRequest(req *Request) {
+	req.Log("%v %v %v %v", req.Request.Method, req.ForceScheme, req.ForceHost, req.Request.URL)
+
+	if isWebsocketHandshake(req.Request) {
+		p.HandleUpgradeRequest(req)
 		return
 	}
 
-	clientRequest, err := prepareRequest(req, forceHost, forceScheme)
+	clientRequest, err := prepareRequest(req.Request, req.ForceHost, req.ForceScheme)
 	if err != nil {
-		p.sendError(res, "error preparing request: %v", err)
+		req.SendError("error preparing request: %v", err)
 		return
 	}
 
 	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
 	if err != nil {
-		p.sendError(res, "error executing request: %v", err)
+		req.SendError("error executing request: %v", err)
 		return
 	}
 
-	if isWebsocketHandshake(req) {
-		dumpResponse(response)
-	}
+	req.Log("   -> %v", response.Status)
 
-	p.logger.Printf("%v %v -> %v", req.Method, req.URL, response.Status)
+	copyHeader(req.ResponseWriter.Header(), response.Header)
+	req.ResponseWriter.WriteHeader(response.StatusCode)
 
-	copyHeader(res.Header(), response.Header)
-	res.WriteHeader(response.StatusCode)
-
-	_, err = io.Copy(res, response.Body)
+	_, err = io.Copy(req.ResponseWriter, response.Body)
 	if err != nil {
-		p.logger.Printf("error copying body: %v", err)
+		req.Log("error copying body: %v", err)
 		return
 	}
 
 	err = response.Body.Close()
 	if err != nil {
-		p.logger.Printf("error closing body: %v", err)
+		req.Log("error closing body: %v", err)
 		return
 	}
 }
@@ -187,7 +202,6 @@ func copyUntilError(src, dst io.ReadWriteCloser) error {
 	var g errgroup.Group
 	g.Go(func() error {
 		_, err := io.Copy(src, dst)
-		fmt.Printf("end one closed: %v\n", err)
 		src.Close()
 		dst.Close()
 		return err
@@ -195,7 +209,6 @@ func copyUntilError(src, dst io.ReadWriteCloser) error {
 
 	g.Go(func() error {
 		_, err := io.Copy(dst, src)
-		fmt.Printf("end two closed: %v\n", err)
 		src.Close()
 		dst.Close()
 		return err
@@ -205,18 +218,18 @@ func copyUntilError(src, dst io.ReadWriteCloser) error {
 }
 
 // HandleUpgradeRequest handles an upgraded connection (e.g. websockets).
-func (p *Proxy) HandleUpgradeRequest(req *http.Request, rw http.ResponseWriter, forceHost, forceScheme string) {
-	reqUpgrade := req.Header.Get("upgrade")
-	p.logger.Printf("received upgrade request for %v", reqUpgrade)
+func (p *Proxy) HandleUpgradeRequest(req *Request) {
+	reqUpgrade := req.Request.Header.Get("upgrade")
+	req.Log("handle upgrade request to %v", reqUpgrade)
 
 	host := req.URL.Host
-	if forceHost != "" {
-		host = forceHost
+	if req.ForceHost != "" {
+		host = req.ForceHost
 	}
 
 	scheme := req.URL.Scheme
-	if forceHost != "" {
-		scheme = forceScheme
+	if req.ForceHost != "" {
+		scheme = req.ForceScheme
 	}
 
 	var outgoingConn net.Conn
@@ -229,31 +242,31 @@ func (p *Proxy) HandleUpgradeRequest(req *http.Request, rw http.ResponseWriter, 
 	}
 
 	if err != nil {
-		p.sendError(rw, "connecting to %v failed: %v", host, err)
+		req.SendError("connecting to %v failed: %v", host, err)
 		req.Body.Close()
 		return
 	}
 
 	defer outgoingConn.Close()
 
-	p.logger.Printf("connected to %v", host)
+	req.Log("connected to %v", host)
 
-	outReq, err := prepareRequest(req, host, scheme)
+	outReq, err := prepareRequest(req.Request, host, scheme)
 	if err != nil {
-		p.sendError(rw, "preparing request to %v failed: %v", host, err)
+		req.SendError("preparing request to %v failed: %v", host, err)
 		req.Body.Close()
 		return
 	}
 
 	// put back the "Connection" header
-	outReq.Header.Set("connection", req.Header.Get("connection"))
+	outReq.Header.Set("connection", req.Request.Header.Get("connection"))
 
-	dumpRequest(req)
+	dumpRequest(req.Request)
 	dumpRequest(outReq)
 
 	err = outReq.Write(outgoingConn)
 	if err != nil {
-		p.sendError(rw, "unable to forward request to %v: %v", host, err)
+		req.SendError("unable to forward request to %v: %v", host, err)
 		req.Body.Close()
 		return
 	}
@@ -261,23 +274,23 @@ func (p *Proxy) HandleUpgradeRequest(req *http.Request, rw http.ResponseWriter, 
 	outgoingReader := bufio.NewReader(outgoingConn)
 	outRes, err := http.ReadResponse(outgoingReader, outReq)
 	if err != nil {
-		p.sendError(rw, "unable to read response from %v: %v", host, err)
+		req.SendError("unable to read response from %v: %v", host, err)
 		req.Body.Close()
 		return
 	}
 
 	dumpResponse(outRes)
 
-	hj, ok := rw.(http.Hijacker)
+	hj, ok := req.ResponseWriter.(http.Hijacker)
 	if !ok {
-		p.sendError(rw, "switching protocols failed, incoming connection is not bidirectional")
+		req.SendError("switching protocols failed, incoming connection is not bidirectional")
 		req.Body.Close()
 		return
 	}
 
 	clientConn, _, err := hj.Hijack()
 	if !ok {
-		p.sendError(rw, "switching protocols failed, hijacking incoming connection failed: %v", err)
+		req.SendError("switching protocols failed, hijacking incoming connection failed: %v", err)
 		req.Body.Close()
 		return
 	}
@@ -285,16 +298,16 @@ func (p *Proxy) HandleUpgradeRequest(req *http.Request, rw http.ResponseWriter, 
 
 	err = outRes.Write(clientConn)
 	if err != nil {
-		p.logger.Printf("writing response to client failed: %v", err)
+		req.Log("writing response to client failed: %v", err)
 		return
 	}
 
-	p.logger.Printf("start forwarding data")
+	req.Log("start forwarding data")
 	err = copyUntilError(outgoingConn, clientConn)
 	if err != nil {
-		p.logger.Printf("copying data for websocket returned error: %v", err)
+		req.Log("copying data for websocket returned error: %v", err)
 	}
-	p.logger.Printf("connection done")
+	req.Log("connection done")
 }
 
 func writeConnectSuccess(wr io.Writer) error {
@@ -325,6 +338,8 @@ func writeConnectError(wr io.WriteCloser, err error) {
 	wr.Close()
 }
 
+var errFakeListenerEOF = errors.New("listener has no more connections")
+
 type fakeListener struct {
 	ch   chan net.Conn
 	addr net.Addr
@@ -333,25 +348,17 @@ type fakeListener struct {
 func (l *fakeListener) Accept() (net.Conn, error) {
 	conn, ok := <-l.ch
 	if !ok {
-		return nil, nil
+		return nil, errFakeListenerEOF
 	}
 	return conn, nil
 }
 
 func (l *fakeListener) Close() error {
-	close(l.ch)
 	return nil
 }
 
 func (l *fakeListener) Addr() net.Addr {
 	return l.addr
-}
-
-func (p *Proxy) sendError(res http.ResponseWriter, msg string, args ...interface{}) {
-	p.logger.Printf(msg, args...)
-	res.Header().Set("Content-Type", "text/plain")
-	res.WriteHeader(http.StatusInternalServerError)
-	fmt.Fprintf(res, msg, args...)
 }
 
 type buffConn struct {
@@ -365,29 +372,29 @@ func (b buffConn) Read(p []byte) (int, error) {
 
 // HandleConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
-func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Request) {
-	p.logger.Printf("CONNECT %v from %v", req.URL.Host, req.RemoteAddr)
+func (p *Proxy) HandleConnect(req *Request) {
+	req.Log("CONNECT %v %v %v", req.ForceScheme, req.ForceHost, req.URL.Host)
 	forceHost := req.URL.Host
 
-	hj, ok := responseWriter.(http.Hijacker)
+	hj, ok := req.ResponseWriter.(http.Hijacker)
 	if !ok {
-		p.sendError(responseWriter, "unable to reuse connection for CONNECT")
+		req.SendError("unable to reuse connection for CONNECT")
 		return
 	}
 
 	conn, rw, err := hj.Hijack()
 	if err != nil {
-		p.sendError(responseWriter, "reusing connection failed: %v", err)
+		req.SendError("reusing connection failed: %v", err)
 		return
 	}
-	defer conn.Close()
 
 	rw.Flush()
 
 	err = writeConnectSuccess(conn)
 	if err != nil {
-		p.logger.Printf("unable to write proxy response: %v", err)
+		req.Log("unable to write proxy response: %v", err)
 		writeConnectError(conn, err)
+		conn.Close()
 		return
 	}
 
@@ -399,7 +406,8 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 
 	buf, err := bconn.Peek(1)
 	if err != nil {
-		p.logger.Printf("peek(1) failed: %v", err)
+		req.Log("peek(1) failed: %v", err)
+		conn.Close()
 		return
 	}
 
@@ -413,43 +421,61 @@ func (p *Proxy) HandleConnect(responseWriter http.ResponseWriter, req *http.Requ
 	// TLS client hello starts with 0x16
 	if buf[0] == 0x16 {
 		tlsConn := tls.Server(bconn, p.serverConfig)
-		defer tlsConn.Close()
 
 		err = tlsConn.Handshake()
 		if err != nil {
-			p.logger.Printf("TLS handshake for %v failed: %v", req.URL.Host, err)
+			req.Log("TLS handshake for %v failed: %v", req.URL.Host, err)
 			return
 		}
 
-		// p.logger.Printf("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
+		// req.Log("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
 
 		listener.ch <- tlsConn
+		close(listener.ch)
+
+		parentID := req.ID
 
 		// handle the next requests as HTTPS
 		srv = &http.Server{
 			ErrorLog: p.logger,
 			Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+
+				preq := p.newRequest(res, req, parentID)
 				// send all requests to the host we were told to connect to
-				p.ServeProxyRequest(res, req, forceHost, "https")
+				preq.ForceHost = forceHost
+				preq.ForceScheme = "https"
+
+				p.ServeProxyRequest(preq)
 			}),
 		}
 	} else {
 		listener.ch <- bconn
+		close(listener.ch)
+
+		parentID := req.ID
 
 		// handle the next requests as HTTP
 		srv = &http.Server{
 			ErrorLog: p.logger,
 			Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+				preq := p.newRequest(res, req, parentID)
 				// send all requests to the host we were told to connect to
-				p.ServeProxyRequest(res, req, forceHost, "http")
+				preq.ForceHost = forceHost
+				preq.ForceScheme = "http"
+
+				p.ServeProxyRequest(preq)
 			}),
 		}
 	}
 
 	// handle all incoming requests
 	err = srv.Serve(listener)
+	if err == errFakeListenerEOF {
+		err = nil
+	}
+
 	if err != nil {
-		p.logger.Printf("error serving TLS connection: %v", err)
+		req.Log("error serving connection: %v", err)
 	}
 }
 
@@ -469,32 +495,76 @@ func dumpRequest(req *http.Request) {
 	}
 }
 
-func (p *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+// Request is a request received by the proxy.
+type Request struct {
+	ID uint64
+
+	*http.Request
+	http.ResponseWriter
+
+	ForceHost, ForceScheme string
+
+	*log.Logger
+}
+
+// Log logs a message through the embedded logger, prefixed with the request.
+func (req *Request) Log(msg string, args ...interface{}) {
+	args = append([]interface{}{req.ID, req.Request.RemoteAddr}, args...)
+	req.Logger.Printf("[%4d %v] "+msg, args...)
+}
+
+// SendError responds with an error (which is also logged).
+func (req *Request) SendError(msg string, args ...interface{}) {
+	req.Logger.Printf(msg, args...)
+	req.ResponseWriter.Header().Set("Content-Type", "text/plain")
+	req.ResponseWriter.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprintf(req.ResponseWriter, msg, args...)
+}
+
+func (p *Proxy) newRequest(rw http.ResponseWriter, req *http.Request, id uint64) *Request {
+	if id == 0 {
+		id = atomic.AddUint64(&p.requestID, 1)
+	}
+
+	return &Request{
+		ID:             id,
+		Request:        req,
+		ResponseWriter: rw,
+		Logger:         p.logger,
+	}
+}
+
+func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.Request) {
+	req := p.newRequest(responseWriter, httpRequest, 0)
+	defer func() {
+		req.Log("done")
+	}()
+
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {
-		p.HandleConnect(res, req)
+		p.HandleConnect(req)
 		return
 	}
 
 	// serve certificate for easier importing
 	if req.URL.Hostname() == "proxy" && req.URL.Path == "/ca" {
-		p.ServeCA(res, req)
+		p.ServeCA(req)
 		return
 	}
 
 	// handle all other requests
-	p.ServeProxyRequest(res, req, "", "")
+	p.ServeProxyRequest(req)
 }
 
 // ServeCA returns the PEM encoded CA certificate.
-func (p *Proxy) ServeCA(res http.ResponseWriter, req *http.Request) {
-	res.Header().Set("Content-Type", "application/x-x509-ca-cert")
-	res.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	res.Header().Set("Pragma", "no-cache")
-	res.Header().Set("Expires", "0")
+func (p *Proxy) ServeCA(req *Request) {
+	req.ResponseWriter.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	req.ResponseWriter.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.ResponseWriter.Header().Set("Pragma", "no-cache")
+	req.ResponseWriter.Header().Set("Expires", "0")
 
-	res.WriteHeader(http.StatusOK)
-	res.Write(p.ca.CertificateAsPEM())
+	req.ResponseWriter.WriteHeader(http.StatusOK)
+	req.ResponseWriter.Write(p.ca.CertificateAsPEM())
 }
 
 // Serve runs the proxy and answers requests.

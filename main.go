@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"time"
 
 	"github.com/happal/osmosis/certauth"
 	"github.com/happal/osmosis/proxy"
@@ -46,8 +48,28 @@ func main() {
 		}
 	}
 
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
 	log.Printf("CA loaded: %v\n", ca.Certificate.Subject)
 
-	proxy := proxy.New(opts.Listen, ca)
+	// cfg := &tls.Config{
+	// 	InsecureSkipVerify: true,
+	// }
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		var last int
+		for range ticker.C {
+			var cur = runtime.NumGoroutine()
+			if cur != last {
+				log.Printf("%d active goroutines", cur)
+				last = cur
+			}
+		}
+	}()
+
+	proxy := proxy.New(opts.Listen, ca, nil)
 	log.Fatal(proxy.Serve())
 }
