@@ -71,5 +71,5 @@ func main() {
 	}()
 
 	proxy := proxy.New(opts.Listen, ca, nil)
-	log.Fatal(proxy.Serve())
+	log.Fatal(proxy.ListenAndServe())
 }

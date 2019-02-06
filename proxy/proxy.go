@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -32,7 +33,8 @@ type Proxy struct {
 
 	logger *log.Logger
 
-	ca *certauth.CertificateAuthority
+	*certauth.CertificateAuthority
+	Addr string
 }
 
 func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
@@ -65,8 +67,9 @@ func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 // New initializes a proxy.
 func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config) *Proxy {
 	proxy := &Proxy{
-		logger: log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds),
-		ca:     ca,
+		logger:               log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds),
+		CertificateAuthority: ca,
+		Addr:                 address,
 	}
 	proxy.serverConfig = &tls.Config{
 		NextProtos: []string{"h2", "http/1.1"},
@@ -564,10 +567,25 @@ func (p *Proxy) ServeCA(req *Request) {
 	req.ResponseWriter.Header().Set("Expires", "0")
 
 	req.ResponseWriter.WriteHeader(http.StatusOK)
-	req.ResponseWriter.Write(p.ca.CertificateAsPEM())
+	req.ResponseWriter.Write(p.CertificateAuthority.CertificateAsPEM())
+}
+
+// ListenAndServe starts the listener and runs the proxy.
+func (p *Proxy) ListenAndServe() error {
+	listener, err := net.Listen("tcp", p.server.Addr)
+	if err != nil {
+		return err
+	}
+
+	return p.Serve(listener)
 }
 
 // Serve runs the proxy and answers requests.
-func (p *Proxy) Serve() error {
-	return p.server.ListenAndServe()
+func (p *Proxy) Serve(listener net.Listener) error {
+	return p.server.Serve(listener)
+}
+
+// Shutdown closes the proxy gracefully.
+func (p *Proxy) Shutdown(ctx context.Context) error {
+	return p.server.Shutdown(ctx)
 }
