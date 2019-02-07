@@ -145,6 +145,9 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 		}
 		req.Header[name] = values
 	}
+
+	req.ContentLength = proxyRequest.ContentLength
+
 	return req, nil
 }
 
@@ -460,6 +463,11 @@ func (p *Proxy) HandleConnect(req *Request) {
 
 		parentID := req.ID
 
+		// use new request IDs for HTTP2
+		if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+			parentID = 0
+		}
+
 		// handle the next requests as HTTPS
 		srv = &http.Server{
 			ErrorLog: p.logger,
@@ -540,7 +548,7 @@ func (req *Request) Log(msg string, args ...interface{}) {
 
 // SendError responds with an error (which is also logged).
 func (req *Request) SendError(msg string, args ...interface{}) {
-	req.Logger.Printf(msg, args...)
+	req.Log(msg, args...)
 	req.ResponseWriter.Header().Set("Content-Type", "text/plain")
 	req.ResponseWriter.WriteHeader(http.StatusInternalServerError)
 	fmt.Fprintf(req.ResponseWriter, msg, args...)

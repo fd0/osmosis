@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/happal/osmosis/certauth"
@@ -129,4 +130,31 @@ func TestProxyTrailer(t *testing.T) {
 	wantBody(t, res, "body string\n")
 	wantHeader(t, res, map[string]string{"Content-Type": "text/plain; charset=utf-8"})
 	wantTrailer(t, res, map[string]string{"Content-Hash": "1234"})
+}
+
+func TestProxyPOST(t *testing.T) {
+	proxy, serve, shutdown := TestProxy(t, nil)
+	go serve()
+	defer shutdown()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		dumpRequest(req)
+
+		rw.WriteHeader(http.StatusOK)
+		_, err := io.Copy(rw, req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer srv.Close()
+
+	client := testClient(t, proxy.Addr, proxy.CertificateAuthority)
+
+	res, err := client.Post(srv.URL, "application/octet-stream", strings.NewReader("foobar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantStatus(t, res, http.StatusOK)
+	wantBody(t, res, "foobar")
 }
