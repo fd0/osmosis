@@ -163,6 +163,12 @@ func copyHeader(dst, src, trailer http.Header) {
 func (p *Proxy) ServeProxyRequest(req *Request) {
 	req.Log("%v %v %v %v", req.Request.Method, req.ForceScheme, req.ForceHost, req.Request.URL)
 
+	// handle websockets
+	if isWebsocketHandshake(req.Request) {
+		HandleUpgradeRequest(req)
+		return
+	}
+
 	clientRequest, err := prepareRequest(req.Request, req.ForceHost, req.ForceScheme)
 	if err != nil {
 		req.SendError("error preparing request: %v", err)
@@ -265,12 +271,6 @@ func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {
 		ServeConnect(req, p.serverConfig, p.logger, p.nextRequestID, p.ServeProxyRequest)
-		return
-	}
-
-	// handle websockets
-	if isWebsocketHandshake(req.Request) {
-		HandleUpgradeRequest(req)
 		return
 	}
 
