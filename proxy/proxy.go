@@ -1,16 +1,13 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -19,7 +16,6 @@ import (
 	"github.com/happal/osmosis/certauth"
 	"golang.org/x/net/context/ctxhttp"
 	"golang.org/x/net/http2"
-	"golang.org/x/sync/errgroup"
 )
 
 // Proxy allows intercepting and modifying requests.
@@ -151,12 +147,6 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 	return req, nil
 }
 
-// isWebsocketHandshake returns true if the request tries to initiate a websocket handshake.
-func isWebsocketHandshake(req *http.Request) bool {
-	upgrade := strings.ToLower(req.Header.Get("upgrade"))
-	return strings.Contains(upgrade, "websocket")
-}
-
 func copyHeader(dst, src, trailer http.Header) {
 	for name, values := range src {
 		for _, value := range values {
@@ -172,11 +162,6 @@ func copyHeader(dst, src, trailer http.Header) {
 // ServeProxyRequest is called for each request the proxy receives.
 func (p *Proxy) ServeProxyRequest(req *Request) {
 	req.Log("%v %v %v %v", req.Request.Method, req.ForceScheme, req.ForceHost, req.Request.URL)
-
-	if isWebsocketHandshake(req.Request) {
-		p.HandleUpgradeRequest(req)
-		return
-	}
 
 	clientRequest, err := prepareRequest(req.Request, req.ForceHost, req.ForceScheme)
 	if err != nil {
@@ -226,308 +211,6 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 	}
 }
 
-func copyUntilError(src, dst io.ReadWriteCloser) error {
-	var g errgroup.Group
-	g.Go(func() error {
-		_, err := io.Copy(src, dst)
-		src.Close()
-		dst.Close()
-		return err
-	})
-
-	g.Go(func() error {
-		_, err := io.Copy(dst, src)
-		src.Close()
-		dst.Close()
-		return err
-	})
-
-	return g.Wait()
-}
-
-// HandleUpgradeRequest handles an upgraded connection (e.g. websockets).
-func (p *Proxy) HandleUpgradeRequest(req *Request) {
-	reqUpgrade := req.Request.Header.Get("upgrade")
-	req.Log("handle upgrade request to %v", reqUpgrade)
-
-	host := req.URL.Host
-	if req.ForceHost != "" {
-		host = req.ForceHost
-	}
-
-	scheme := req.URL.Scheme
-	if req.ForceHost != "" {
-		scheme = req.ForceScheme
-	}
-
-	var outgoingConn net.Conn
-	var err error
-
-	if scheme == "https" {
-		outgoingConn, err = tls.Dial("tcp", host, nil)
-	} else {
-		outgoingConn, err = net.Dial("tcp", host)
-	}
-
-	if err != nil {
-		req.SendError("connecting to %v failed: %v", host, err)
-		req.Body.Close()
-		return
-	}
-
-	defer outgoingConn.Close()
-
-	req.Log("connected to %v", host)
-
-	outReq, err := prepareRequest(req.Request, host, scheme)
-	if err != nil {
-		req.SendError("preparing request to %v failed: %v", host, err)
-		req.Body.Close()
-		return
-	}
-
-	// put back the "Connection" header
-	outReq.Header.Set("connection", req.Request.Header.Get("connection"))
-
-	dumpRequest(req.Request)
-	dumpRequest(outReq)
-
-	err = outReq.Write(outgoingConn)
-	if err != nil {
-		req.SendError("unable to forward request to %v: %v", host, err)
-		req.Body.Close()
-		return
-	}
-
-	outgoingReader := bufio.NewReader(outgoingConn)
-	outRes, err := http.ReadResponse(outgoingReader, outReq)
-	if err != nil {
-		req.SendError("unable to read response from %v: %v", host, err)
-		req.Body.Close()
-		return
-	}
-
-	dumpResponse(outRes)
-
-	hj, ok := req.ResponseWriter.(http.Hijacker)
-	if !ok {
-		req.SendError("switching protocols failed, incoming connection is not bidirectional")
-		req.Body.Close()
-		return
-	}
-
-	clientConn, _, err := hj.Hijack()
-	if !ok {
-		req.SendError("switching protocols failed, hijacking incoming connection failed: %v", err)
-		req.Body.Close()
-		return
-	}
-	defer clientConn.Close()
-
-	err = outRes.Write(clientConn)
-	if err != nil {
-		req.Log("writing response to client failed: %v", err)
-		return
-	}
-
-	req.Log("start forwarding data")
-	err = copyUntilError(outgoingConn, clientConn)
-	if err != nil {
-		req.Log("copying data for websocket returned error: %v", err)
-	}
-	req.Log("connection done")
-}
-
-func writeConnectSuccess(wr io.Writer) error {
-	res := http.Response{
-		Proto:         "HTTP/1.0",
-		ProtoMajor:    1,
-		ProtoMinor:    0,
-		Status:        http.StatusText(http.StatusOK),
-		StatusCode:    http.StatusOK,
-		ContentLength: -1,
-	}
-
-	return res.Write(wr)
-}
-
-func writeConnectError(wr io.WriteCloser, err error) {
-	res := http.Response{
-		Proto:         "HTTP/1.0",
-		ProtoMajor:    1,
-		ProtoMinor:    0,
-		Status:        http.StatusText(http.StatusInternalServerError),
-		StatusCode:    http.StatusInternalServerError,
-		ContentLength: -1,
-	}
-
-	res.Write(wr)
-	fmt.Fprintf(wr, "error: %v\n", err)
-	wr.Close()
-}
-
-var errFakeListenerEOF = errors.New("listener has no more connections")
-
-type fakeListener struct {
-	ch   chan net.Conn
-	addr net.Addr
-}
-
-func (l *fakeListener) Accept() (net.Conn, error) {
-	conn, ok := <-l.ch
-	if !ok {
-		return nil, errFakeListenerEOF
-	}
-	return conn, nil
-}
-
-func (l *fakeListener) Close() error {
-	return nil
-}
-
-func (l *fakeListener) Addr() net.Addr {
-	return l.addr
-}
-
-type buffConn struct {
-	*bufio.Reader
-	net.Conn
-}
-
-func (b buffConn) Read(p []byte) (int, error) {
-	return b.Reader.Read(p)
-}
-
-// HandleConnect makes a connection to a target host and forwards all packets.
-// If an error is returned, hijacking the connection hasn't worked.
-func (p *Proxy) HandleConnect(req *Request) {
-	req.Log("CONNECT %v %v %v", req.ForceScheme, req.ForceHost, req.URL.Host)
-	forceHost := req.URL.Host
-
-	hj, ok := req.ResponseWriter.(http.Hijacker)
-	if !ok {
-		req.SendError("unable to reuse connection for CONNECT")
-		return
-	}
-
-	conn, rw, err := hj.Hijack()
-	if err != nil {
-		req.SendError("reusing connection failed: %v", err)
-		return
-	}
-
-	rw.Flush()
-
-	err = writeConnectSuccess(conn)
-	if err != nil {
-		req.Log("unable to write proxy response: %v", err)
-		writeConnectError(conn, err)
-		conn.Close()
-		return
-	}
-
-	// try to find out if the client tries to setup TLS
-	bconn := buffConn{
-		Reader: bufio.NewReader(conn),
-		Conn:   conn,
-	}
-
-	buf, err := bconn.Peek(1)
-	if err != nil {
-		req.Log("peek(1) failed: %v", err)
-		conn.Close()
-		return
-	}
-
-	listener := &fakeListener{
-		ch:   make(chan net.Conn, 1),
-		addr: conn.RemoteAddr(),
-	}
-
-	var srv *http.Server
-
-	// TLS client hello starts with 0x16
-	if buf[0] == 0x16 {
-		tlsConn := tls.Server(bconn, p.serverConfig)
-
-		err = tlsConn.Handshake()
-		if err != nil {
-			req.Log("TLS handshake for %v failed: %v", req.URL.Host, err)
-			return
-		}
-
-		// req.Log("TLS handshake for %v succeeded, next protocol: %v", req.URL.Host, tlsConn.ConnectionState().NegotiatedProtocol)
-
-		listener.ch <- tlsConn
-		close(listener.ch)
-
-		parentID := req.ID
-
-		// use new request IDs for HTTP2
-		if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
-			parentID = 0
-		}
-
-		// handle the next requests as HTTPS
-		srv = &http.Server{
-			ErrorLog: p.logger,
-			Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
-
-				preq := p.newRequest(res, req, parentID)
-				// send all requests to the host we were told to connect to
-				preq.ForceHost = forceHost
-				preq.ForceScheme = "https"
-
-				p.ServeProxyRequest(preq)
-			}),
-		}
-	} else {
-		listener.ch <- bconn
-		close(listener.ch)
-
-		parentID := req.ID
-
-		// handle the next requests as HTTP
-		srv = &http.Server{
-			ErrorLog: p.logger,
-			Handler: http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
-				preq := p.newRequest(res, req, parentID)
-				// send all requests to the host we were told to connect to
-				preq.ForceHost = forceHost
-				preq.ForceScheme = "http"
-
-				p.ServeProxyRequest(preq)
-			}),
-		}
-	}
-
-	// handle all incoming requests
-	err = srv.Serve(listener)
-	if err == errFakeListenerEOF {
-		err = nil
-	}
-
-	if err != nil {
-		req.Log("error serving connection: %v", err)
-	}
-}
-
-func dumpResponse(res *http.Response) {
-	buf, err := httputil.DumpResponse(res, true)
-	if err == nil {
-		fmt.Printf("--------------\n%s\n--------------\n", buf)
-		// fmt.Printf("body: %#v\n", res.Body)
-	}
-}
-
-func dumpRequest(req *http.Request) {
-	buf, err := httputil.DumpRequest(req, true)
-	if err == nil {
-		fmt.Printf("--------------\n%s\n--------------\n", buf)
-		// fmt.Printf("body: %#v\n", req.Body)
-	}
-}
-
 // Request is a request received by the proxy.
 type Request struct {
 	ID uint64
@@ -554,50 +237,51 @@ func (req *Request) SendError(msg string, args ...interface{}) {
 	fmt.Fprintf(req.ResponseWriter, msg, args...)
 }
 
-func (p *Proxy) newRequest(rw http.ResponseWriter, req *http.Request, id uint64) *Request {
-	if id == 0 {
-		id = atomic.AddUint64(&p.requestID, 1)
-	}
+func (p *Proxy) nextRequestID() uint64 {
+	return atomic.AddUint64(&p.requestID, 1)
+}
 
+func newRequest(rw http.ResponseWriter, req *http.Request, logger *log.Logger, id uint64) *Request {
 	return &Request{
 		ID:             id,
 		Request:        req,
 		ResponseWriter: rw,
-		Logger:         p.logger,
+		Logger:         logger,
 	}
 }
 
+// isWebsocketHandshake returns true if the request tries to initiate a websocket handshake.
+func isWebsocketHandshake(req *http.Request) bool {
+	upgrade := strings.ToLower(req.Header.Get("upgrade"))
+	return strings.Contains(upgrade, "websocket")
+}
+
 func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.Request) {
-	req := p.newRequest(responseWriter, httpRequest, 0)
+	req := newRequest(responseWriter, httpRequest, p.logger, p.nextRequestID())
 	defer func() {
 		req.Log("done")
 	}()
 
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {
-		p.HandleConnect(req)
+		ServeConnect(req, p.serverConfig, p.logger, p.nextRequestID, p.ServeProxyRequest)
+		return
+	}
+
+	// handle websockets
+	if isWebsocketHandshake(req.Request) {
+		HandleUpgradeRequest(req)
 		return
 	}
 
 	// serve certificate for easier importing
-	if req.URL.Hostname() == "proxy" && req.URL.Path == "/ca" {
-		p.ServeCA(req)
+	if req.URL.Hostname() == "proxy" {
+		ServeStatic(req.ResponseWriter, req.Request, p.CertificateAuthority.CertificateAsPEM())
 		return
 	}
 
 	// handle all other requests
 	p.ServeProxyRequest(req)
-}
-
-// ServeCA returns the PEM encoded CA certificate.
-func (p *Proxy) ServeCA(req *Request) {
-	req.ResponseWriter.Header().Set("Content-Type", "application/x-x509-ca-cert")
-	req.ResponseWriter.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.ResponseWriter.Header().Set("Pragma", "no-cache")
-	req.ResponseWriter.Header().Set("Expires", "0")
-
-	req.ResponseWriter.WriteHeader(http.StatusOK)
-	req.ResponseWriter.Write(p.CertificateAuthority.CertificateAsPEM())
 }
 
 // ListenAndServe starts the listener and runs the proxy.
