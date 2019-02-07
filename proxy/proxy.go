@@ -175,9 +175,32 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 		return
 	}
 
+	luaEngine := NewLuaEngine()
+	defer luaEngine.Close()
+
+	err = luaEngine.DoFile("main.lua")
+	if err != nil {
+		req.SendError("error loading main.lua: %v", err)
+		return
+	}
+
+	err = luaEngine.CallOnRequest(clientRequest)
+	if err != nil {
+		req.SendError("error in onRequest callback: %v", err)
+		// TODO: really discard everything here?
+		return
+	}
+
 	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
 	if err != nil {
 		req.SendError("error executing request: %v", err)
+		return
+	}
+
+	err = luaEngine.CallOnResponse(response)
+	if err != nil {
+		req.SendError("error in onResponse callback: %v", err)
+		// TODO: same as above: discard request if Lua errors?
 		return
 	}
 

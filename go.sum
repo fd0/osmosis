@@ -1,3 +1,5 @@
+github.com/aarzilli/golua v0.0.0-20180302084504-459c093c4212 h1:oKyJnWgM59kXnyxBxM6J6eylbTf4lDt6Bo5AvyEI+dw=
+github.com/aarzilli/golua v0.0.0-20180302084504-459c093c4212/go.mod h1:SV7PRru1lATaCdZXNt5AZHw0uKiN1BoYBHrcctQ1Ouc=
 github.com/gorilla/websocket v1.4.0 h1:WDFjx/TMzVgy9VdMMQi2K2Emtwi2QcUQsztZ/zLaH/Q=
 github.com/gorilla/websocket v1.4.0/go.mod h1:E7qHFY5m1UJ88s3WnNqhKjPHQ0heANvMoAMk2YaljkQ=
 github.com/spf13/pflag v1.0.3 h1:zPAT6CGy6wXeQ7NtTnaTerfKOsV6V6F8agHXFiazDkg=
