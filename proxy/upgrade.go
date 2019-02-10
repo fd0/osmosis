@@ -73,9 +73,6 @@ func HandleUpgradeRequest(req *Request) {
 	// put back the "Connection" header
 	outReq.Header.Set("connection", req.Request.Header.Get("connection"))
 
-	dumpRequest(req.Request)
-	dumpRequest(outReq)
-
 	err = outReq.Write(outgoingConn)
 	if err != nil {
 		req.SendError("unable to forward request to %v: %v", host, err)
@@ -90,8 +87,6 @@ func HandleUpgradeRequest(req *Request) {
 		req.Body.Close()
 		return
 	}
-
-	dumpResponse(outRes)
 
 	hj, ok := req.ResponseWriter.(http.Hijacker)
 	if !ok {

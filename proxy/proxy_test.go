@@ -138,8 +138,6 @@ func TestProxyPOST(t *testing.T) {
 	defer shutdown()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		dumpRequest(req)
-
 		rw.WriteHeader(http.StatusOK)
 		_, err := io.Copy(rw, req.Body)
 		if err != nil {
