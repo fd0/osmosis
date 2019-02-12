@@ -60,7 +60,9 @@ func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 	}
 }
 
-// New initializes a proxy.
+// New returns a new proxy which generates certificates on demand and signs
+// them with using ca. The clientConfig is used for outgoing TLS client
+// connections.
 func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config) *Proxy {
 	proxy := &Proxy{
 		logger:               log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds),
