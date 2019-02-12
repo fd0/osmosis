@@ -69,8 +69,13 @@ func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Co
 		CertificateAuthority: ca,
 		Addr:                 address,
 	}
+
+	// TLS server configuration
 	proxy.serverConfig = &tls.Config{
+		// advertise HTTP2
 		NextProtos: []string{"h2", "http/1.1"},
+
+		// generate a new certificate on the fly for the client
 		GetCertificate: func(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			crt, err := ca.NewCertificate(ch.ServerName, []string{ch.ServerName})
 			if err != nil {
@@ -96,6 +101,7 @@ func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Co
 		Handler:  proxy,
 	}
 
+	// initialize HTTP client to use
 	proxy.client = newHTTPClient(true, clientConfig)
 
 	return proxy
