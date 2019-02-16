@@ -94,10 +94,14 @@ func LoadCertificate(filename string) (*x509.Certificate, error) {
 		return nil, err
 	}
 
+	return parseCertificate(buf)
+}
+
+func parseCertificate(buf []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(buf)
 	if block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("key not found in %v: wanted type %q, got %q",
-			filename, "CERTIFICATE", block.Type)
+		return nil, fmt.Errorf("key not found: wanted type %q, got %q",
+			"CERTIFICATE", block.Type)
 	}
 
 	return x509.ParseCertificate(block.Bytes)
@@ -117,10 +121,14 @@ func LoadPrivateKey(filename string) (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 
+	return parsePrivateKey(buf)
+}
+
+func parsePrivateKey(buf []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(buf)
 	if block.Type != "RSA PRIVATE KEY" {
-		return nil, fmt.Errorf("key not found in %v: wanted type %q, got %q",
-			filename, "RSA PRIVATE KEY", block.Type)
+		return nil, fmt.Errorf("key not found: wanted type %q, got %q",
+			"RSA PRIVATE KEY", block.Type)
 	}
 
 	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
