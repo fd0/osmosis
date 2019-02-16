@@ -161,7 +161,7 @@ func (ca *CertificateAuthority) CertificateAsPEM() []byte {
 }
 
 // NewCertificate creates a new certificate for the given host name or IP address.
-func (ca *CertificateAuthority) NewCertificate(commonName string, names []string) (*x509.Certificate, error) {
+func (ca *CertificateAuthority) NewCertificate(commonName string, names []string) (*x509.Certificate, *rsa.PrivateKey, error) {
 	// generate random 64 bit serial
 	serial := make([]byte, 8)
 	_, err := rand.Read(serial)
@@ -194,10 +194,15 @@ func (ca *CertificateAuthority) NewCertificate(commonName string, names []string
 
 	derCert, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, ca.Key.Public(), ca.Key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return x509.ParseCertificate(derCert)
+	cert, err := x509.ParseCertificate(derCert)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return cert, ca.Key, nil
 }
 
 // Clone creates a new certificate based the certificate c and signs it with the CA.

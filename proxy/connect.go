@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -10,8 +12,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-
-	"github.com/happal/osmosis/certauth"
 )
 
 type buffConn struct {
@@ -74,9 +74,14 @@ func writeConnectError(wr io.WriteCloser, err error) {
 	wr.Close()
 }
 
+// CertificateCreater creates a new certificate.
+type CertificateCreater interface {
+	NewCertificate(name string, altNames []string) (*x509.Certificate, *rsa.PrivateKey, error)
+}
+
 // ServeConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
-func ServeConnect(req *Request, tlsConfig *tls.Config, ca *certauth.CertificateAuthority, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
+func ServeConnect(req *Request, tlsConfig *tls.Config, ca CertificateCreater, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
 	req.Log("CONNECT %v %v %v", req.ForceScheme, req.ForceHost, req.URL.Host)
 
 	hj, ok := req.ResponseWriter.(http.Hijacker)
@@ -146,7 +151,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca *certauth.CertificateA
 				name = data[0]
 			}
 
-			crt, err := ca.NewCertificate(name, []string{name})
+			crt, key, err := ca.NewCertificate(name, []string{name})
 			if err != nil {
 				return nil, err
 			}
@@ -158,7 +163,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca *certauth.CertificateA
 				Certificate: [][]byte{
 					crt.Raw,
 				},
-				PrivateKey: ca.Key,
+				PrivateKey: key,
 			}
 
 			return tlscrt, nil
