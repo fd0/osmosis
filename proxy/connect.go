@@ -133,7 +133,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca *certauth.CertificateA
 	if buf[0] == 0x16 {
 
 		// create new TLS config for this server, copying all values from tlsConfig
-		var cfg = *tlsConfig
+		var cfg = tlsConfig.Clone()
 
 		// generate a new certificate on the fly for the client
 		cfg.GetCertificate = func(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -164,7 +164,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca *certauth.CertificateA
 			return tlscrt, nil
 		}
 
-		tlsConn := tls.Server(bconn, &cfg)
+		tlsConn := tls.Server(bconn, cfg)
 
 		err = tlsConn.Handshake()
 		if err != nil {
