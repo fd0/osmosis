@@ -79,8 +79,6 @@ func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
 	req.Log("handle upgrade request to %v", reqUpgrade)
 	defer req.Log("done")
 
-	dumpRequest(req.Request)
-
 	// try to negotiate a websocket connection with the incoming request
 	var upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
