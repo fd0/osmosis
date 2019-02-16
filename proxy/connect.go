@@ -9,6 +9,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
+
+	"github.com/happal/osmosis/certauth"
 )
 
 type buffConn struct {
@@ -73,7 +76,7 @@ func writeConnectError(wr io.WriteCloser, err error) {
 
 // ServeConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
-func ServeConnect(req *Request, tlsConfig *tls.Config, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
+func ServeConnect(req *Request, tlsConfig *tls.Config, ca *certauth.CertificateAuthority, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
 	req.Log("CONNECT %v %v %v", req.ForceScheme, req.ForceHost, req.URL.Host)
 
 	hj, ok := req.ResponseWriter.(http.Hijacker)
@@ -128,7 +131,40 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, errorLogger *log.Logger, 
 
 	// TLS client hello starts with 0x16
 	if buf[0] == 0x16 {
-		tlsConn := tls.Server(bconn, tlsConfig)
+
+		// create new TLS config for this server, copying all values from tlsConfig
+		var cfg = *tlsConfig
+
+		// generate a new certificate on the fly for the client
+		cfg.GetCertificate = func(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			name := ch.ServerName
+
+			// client did not include SNI in ClientHello, so we'll use forceHost instead
+			if name == "" {
+				data := strings.Split(forceHost, ":")
+				req.Log("client did not include SNI, using %v", data[0])
+				name = data[0]
+			}
+
+			crt, err := ca.NewCertificate(name, []string{name})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Log("new certificate names: %v", crt.DNSNames)
+			req.Log("new certificate ips: %v", crt.IPAddresses)
+
+			tlscrt := &tls.Certificate{
+				Certificate: [][]byte{
+					crt.Raw,
+				},
+				PrivateKey: ca.Key,
+			}
+
+			return tlscrt, nil
+		}
+
+		tlsConn := tls.Server(bconn, &cfg)
 
 		err = tlsConn.Handshake()
 		if err != nil {

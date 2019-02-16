@@ -1,118 +1,150 @@
 package proxy
 
 import (
-	"bufio"
 	"crypto/tls"
-	"io"
-	"net"
 	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/gorilla/websocket"
 
 	"golang.org/x/sync/errgroup"
 )
 
-func copyUntilError(src, dst io.ReadWriteCloser) error {
+func copyWSMessages(src, dst *websocket.Conn) error {
+	for {
+		msgType, buf, err := src.ReadMessage()
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		err = dst.WriteMessage(msgType, buf)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func copyWSUntilError(c1, c2 *websocket.Conn) error {
 	var g errgroup.Group
 	g.Go(func() error {
-		_, err := io.Copy(src, dst)
-		src.Close()
-		dst.Close()
-		return err
+		defer c2.Close()
+		return copyWSMessages(c1, c2)
 	})
-
 	g.Go(func() error {
-		_, err := io.Copy(dst, src)
-		src.Close()
-		dst.Close()
-		return err
+		defer c1.Close()
+		return copyWSMessages(c2, c1)
 	})
 
 	return g.Wait()
 }
 
+// filterWSHeaders contains headers which should not be used for establishing
+// an outgoing websocket connection.
+var filterWSHeaders = map[string]struct{}{
+	"connection":               struct{}{},
+	"upgrade":                  struct{}{},
+	"sec-websocket-key":        struct{}{},
+	"sec-websocket-version":    struct{}{},
+	"sec-websocket-protocol":   struct{}{},
+	"sec-websocket-extensions": struct{}{},
+}
+
+// prepareWSHeader copies all values from src to a new http.Header, except for
+// the fields that are used to establish the websocket connection.
+func prepareWSHeader(src http.Header) http.Header {
+	hdr := make(http.Header, len(src))
+
+	for name, values := range src {
+		if _, ok := filterWSHeaders[strings.ToLower(name)]; ok {
+			// header is filtered, do not send it to the upstream server
+			continue
+		}
+
+		if newname, ok := renameHeaders[strings.ToLower(name)]; ok {
+			name = newname
+		}
+		hdr[name] = values
+	}
+
+	return hdr
+}
+
 // HandleUpgradeRequest handles an upgraded connection (e.g. websockets).
-func HandleUpgradeRequest(req *Request) {
+func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
 	reqUpgrade := req.Request.Header.Get("upgrade")
 	req.Log("handle upgrade request to %v", reqUpgrade)
+	defer req.Log("done")
 
-	host := req.URL.Host
+	dumpRequest(req.Request)
+
+	// try to negotiate a websocket connection with the incoming request
+	var upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+
+		// allow all origins, we are a proxy
+		CheckOrigin: func(*http.Request) bool { return true },
+	}
+
+	inConn, err := upgrader.Upgrade(req.ResponseWriter, req.Request, nil)
+	if err != nil {
+		req.SendError("unable to negotiate a websocket upgrade: %v", err)
+		req.Body.Close()
+		return
+	}
+	defer inConn.Close()
+
+	req.Log("negotiated websocket upgrade, establishing outgoing connection")
+
+	wsURL := new(url.URL)
+	// copy all values from the request URL
+	*wsURL = *req.URL
+
+	// apply forced host and scheme
 	if req.ForceHost != "" {
-		host = req.ForceHost
+		wsURL.Host = req.ForceHost
 	}
 
-	scheme := req.URL.Scheme
-	if req.ForceHost != "" {
-		scheme = req.ForceScheme
+	if req.ForceScheme != "" {
+		wsURL.Scheme = req.ForceScheme
 	}
 
-	var outgoingConn net.Conn
-	var err error
-
-	if scheme == "https" {
-		outgoingConn, err = tls.Dial("tcp", host, nil)
-	} else {
-		outgoingConn, err = net.Dial("tcp", host)
+	// set websocket scheme
+	switch wsURL.Scheme {
+	case "http":
+		wsURL.Scheme = "ws"
+	case "https":
+		wsURL.Scheme = "wss"
 	}
 
+	hdr := prepareWSHeader(req.Request.Header)
+
+	req.Log("connect to %v", wsURL)
+
+	// remove the upgrade header field, it's re-added by the websocket library later
+	hdr.Del("upgrade")
+
+	var dialer = *websocket.DefaultDialer
+	dialer.TLSClientConfig = clientConfig
+
+	outConn, res, err := dialer.DialContext(req.Context(), wsURL.String(), hdr)
 	if err != nil {
-		req.SendError("connecting to %v failed: %v", host, err)
-		req.Body.Close()
+		req.Log("connecting to %v failed: %v", wsURL, err)
+		dumpResponse(res)
 		return
 	}
 
-	defer outgoingConn.Close()
+	defer outConn.Close()
 
-	req.Log("connected to %v", host)
+	req.Log("established outogoing connection to %v", wsURL)
 
-	outReq, err := prepareRequest(req.Request, host, scheme)
+	err = copyWSUntilError(inConn, outConn)
 	if err != nil {
-		req.SendError("preparing request to %v failed: %v", host, err)
-		req.Body.Close()
+		req.Log("error copying messages: %v", err)
 		return
 	}
-
-	// put back the "Connection" header
-	outReq.Header.Set("connection", req.Request.Header.Get("connection"))
-
-	err = outReq.Write(outgoingConn)
-	if err != nil {
-		req.SendError("unable to forward request to %v: %v", host, err)
-		req.Body.Close()
-		return
-	}
-
-	outgoingReader := bufio.NewReader(outgoingConn)
-	outRes, err := http.ReadResponse(outgoingReader, outReq)
-	if err != nil {
-		req.SendError("unable to read response from %v: %v", host, err)
-		req.Body.Close()
-		return
-	}
-
-	hj, ok := req.ResponseWriter.(http.Hijacker)
-	if !ok {
-		req.SendError("switching protocols failed, incoming connection is not bidirectional")
-		req.Body.Close()
-		return
-	}
-
-	clientConn, _, err := hj.Hijack()
-	if !ok {
-		req.SendError("switching protocols failed, hijacking incoming connection failed: %v", err)
-		req.Body.Close()
-		return
-	}
-	defer clientConn.Close()
-
-	err = outRes.Write(clientConn)
-	if err != nil {
-		req.Log("writing response to client failed: %v", err)
-		return
-	}
-
-	req.Log("start forwarding data")
-	err = copyUntilError(outgoingConn, clientConn)
-	if err != nil {
-		req.Log("copying data for websocket returned error: %v", err)
-	}
-	req.Log("connection done")
 }

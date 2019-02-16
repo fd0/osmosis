@@ -25,7 +25,8 @@ type Proxy struct {
 
 	requestID uint64
 
-	client *http.Client
+	client       *http.Client
+	clientConfig *tls.Config
 
 	logger *log.Logger
 
@@ -73,24 +74,7 @@ func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Co
 	// TLS server configuration
 	proxy.serverConfig = &tls.Config{
 		// advertise HTTP2
-		NextProtos: []string{"h2", "http/1.1"},
-
-		// generate a new certificate on the fly for the client
-		GetCertificate: func(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			crt, err := ca.NewCertificate(ch.ServerName, []string{ch.ServerName})
-			if err != nil {
-				return nil, err
-			}
-
-			tlscrt := &tls.Certificate{
-				Certificate: [][]byte{
-					crt.Raw,
-				},
-				PrivateKey: ca.Key,
-			}
-
-			return tlscrt, nil
-		},
+		NextProtos:    []string{"h2", "http/1.1"},
 		Renegotiation: 0,
 	}
 
@@ -103,6 +87,7 @@ func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Co
 
 	// initialize HTTP client to use
 	proxy.client = newHTTPClient(true, clientConfig)
+	proxy.clientConfig = clientConfig
 
 	return proxy
 }
@@ -118,9 +103,10 @@ var filterHeaders = map[string]struct{}{
 // (mixed-case)representation, which is normalized away by default by the Go
 // http.Header struct.
 var renameHeaders = map[string]string{
-	"sec-websocket-key":      "Sec-WebSocket-Key",
-	"sec-websocket-version":  "Sec-WebSocket-Version",
-	"sec-websocket-protocol": "Sec-WebSocket-Protocol",
+	"sec-websocket-key":        "Sec-WebSocket-Key",
+	"sec-websocket-version":    "Sec-WebSocket-Version",
+	"sec-websocket-protocol":   "Sec-WebSocket-Protocol",
+	"sec-websocket-extensions": "Sec-WebSocket-Extensions",
 }
 
 func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Request, error) {
@@ -173,7 +159,7 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 
 	// handle websockets
 	if isWebsocketHandshake(req.Request) {
-		HandleUpgradeRequest(req)
+		HandleUpgradeRequest(req, p.clientConfig)
 		return
 	}
 
@@ -278,7 +264,7 @@ func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.
 
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {
-		ServeConnect(req, p.serverConfig, p.logger, p.nextRequestID, p.ServeProxyRequest)
+		ServeConnect(req, p.serverConfig, p.CertificateAuthority, p.logger, p.nextRequestID, p.ServeProxyRequest)
 		return
 	}
 
