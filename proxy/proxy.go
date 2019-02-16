@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -109,6 +110,11 @@ var renameHeaders = map[string]string{
 	"sec-websocket-extensions": "Sec-WebSocket-Extensions",
 }
 
+type bufferedReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
 func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Request, error) {
 	url := proxyRequest.URL
 	if host != "" {
@@ -116,7 +122,24 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 		url.Host = host
 	}
 
-	req, err := http.NewRequest(proxyRequest.Method, url.String(), proxyRequest.Body)
+	// try to find out if the body is non-nil but won't yield any data
+	var body = proxyRequest.Body
+	if proxyRequest.Body != nil {
+		rd := bufio.NewReader(proxyRequest.Body)
+		buf, err := rd.Peek(1)
+		if err == io.EOF || len(buf) == 0 {
+			// if the body is non-nil but nothing can be read from it we set the body to http.NoBody
+			// this happens for incoming http2 connections
+			body = http.NoBody
+		} else {
+			body = bufferedReadCloser{
+				Reader: rd,
+				Closer: proxyRequest.Body,
+			}
+		}
+	}
+
+	req, err := http.NewRequest(proxyRequest.Method, url.String(), body)
 	if err != nil {
 		return nil, err
 	}
