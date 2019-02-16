@@ -206,7 +206,7 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 	// send the trailer values
 	for name, values := range response.Trailer {
 		for _, value := range values {
-			req.ResponseWriter.Header().Set(name, value)
+			req.ResponseWriter.Header().Add(name, value)
 		}
 	}
 }
