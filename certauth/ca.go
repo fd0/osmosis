@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/big"
+	"net"
 	"time"
 )
 
@@ -182,7 +183,13 @@ func (ca *CertificateAuthority) NewCertificate(commonName string, names []string
 	}
 
 	for _, name := range names {
-		template.DNSNames = append(template.DNSNames, name)
+		// try to parse an IP address to find out if we should insert a DNS name or an IP address
+		ip := net.ParseIP(name)
+		if ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, name)
+		}
 	}
 
 	derCert, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, ca.Key.Public(), ca.Key)

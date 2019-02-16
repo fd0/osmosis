@@ -39,3 +39,14 @@ func BenchmarkNew(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkNewCertificate(b *testing.B) {
+	ca := TestCA(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := ca.NewCertificate("foo", []string{"foo"})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
