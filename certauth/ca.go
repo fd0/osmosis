@@ -199,3 +199,16 @@ func (ca *CertificateAuthority) NewCertificate(commonName string, names []string
 
 	return x509.ParseCertificate(derCert)
 }
+
+// Clone creates a new certificate based the certificate c and signs it with the CA.
+func (ca *CertificateAuthority) Clone(c *x509.Certificate) (*x509.Certificate, error) {
+	// make a shallow copy of c
+	var template = *c
+
+	derCert, err := x509.CreateCertificate(rand.Reader, &template, ca.Certificate, ca.Key.Public(), ca.Key)
+	if err != nil {
+		return nil, err
+	}
+
+	return x509.ParseCertificate(derCert)
+}
