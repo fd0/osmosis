@@ -32,6 +32,7 @@ type Proxy struct {
 	logger *log.Logger
 
 	*certauth.CertificateAuthority
+	*Cache
 	Addr string
 }
 
@@ -66,9 +67,11 @@ func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 // them with using ca. The clientConfig is used for outgoing TLS client
 // connections.
 func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config) *Proxy {
+	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds)
 	proxy := &Proxy{
-		logger:               log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds),
+		logger:               logger,
 		CertificateAuthority: ca,
+		Cache:                NewCache(ca, clientConfig, logger),
 		Addr:                 address,
 	}
 
@@ -287,7 +290,7 @@ func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.
 
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {
-		ServeConnect(req, p.serverConfig, p.CertificateAuthority, p.logger, p.nextRequestID, p.ServeProxyRequest)
+		ServeConnect(req, p.serverConfig, p.Cache, p.logger, p.nextRequestID, p.ServeProxyRequest)
 		return
 	}
 

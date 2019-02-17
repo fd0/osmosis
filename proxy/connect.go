@@ -3,14 +3,12 @@ package proxy
 import (
 	"bufio"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"strings"
 )
 
 type buffConn struct {
@@ -73,15 +71,9 @@ func writeConnectError(wr io.WriteCloser, err error) {
 	wr.Close()
 }
 
-// CertificateCreater creates a new certificate.
-type CertificateCreater interface {
-	NewCertificate(name string, altNames []string) (*x509.Certificate, error)
-	TLSCert(*x509.Certificate) *tls.Certificate
-}
-
 // ServeConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
-func ServeConnect(req *Request, tlsConfig *tls.Config, ca CertificateCreater, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
+func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
 	req.Log("CONNECT %v %v %v", req.ForceScheme, req.ForceHost, req.URL.Host)
 
 	hj, ok := req.ResponseWriter.(http.Hijacker)
@@ -131,6 +123,9 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca CertificateCreater, er
 	}
 
 	var forceHost = req.URL.Host
+	if req.ForceHost != "" {
+		forceHost = req.ForceHost
+	}
 	var forceScheme string
 	var parentID = req.ID
 
@@ -142,24 +137,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca CertificateCreater, er
 
 		// generate a new certificate on the fly for the client
 		cfg.GetCertificate = func(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			name := ch.ServerName
-
-			// client did not include SNI in ClientHello, so we'll use forceHost instead
-			if name == "" {
-				data := strings.Split(forceHost, ":")
-				req.Log("client did not include SNI, using %v", data[0])
-				name = data[0]
-			}
-
-			crt, err := ca.NewCertificate(name, []string{name})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Log("new certificate names: %v", crt.DNSNames)
-			req.Log("new certificate ips: %v", crt.IPAddresses)
-
-			return ca.TLSCert(crt), nil
+			return certCache.Get(req.Request.Context(), forceHost, ch.ServerName)
 		}
 
 		tlsConn := tls.Server(bconn, cfg)
