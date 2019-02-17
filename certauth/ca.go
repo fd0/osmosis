@@ -3,6 +3,7 @@ package certauth
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -161,7 +162,7 @@ func (ca *CertificateAuthority) CertificateAsPEM() []byte {
 }
 
 // NewCertificate creates a new certificate for the given host name or IP address.
-func (ca *CertificateAuthority) NewCertificate(commonName string, names []string) (*x509.Certificate, *rsa.PrivateKey, error) {
+func (ca *CertificateAuthority) NewCertificate(commonName string, names []string) (*x509.Certificate, error) {
 	// generate random 64 bit serial
 	serial := make([]byte, 8)
 	_, err := rand.Read(serial)
@@ -194,15 +195,15 @@ func (ca *CertificateAuthority) NewCertificate(commonName string, names []string
 
 	derCert, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, ca.Key.Public(), ca.Key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	cert, err := x509.ParseCertificate(derCert)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	return cert, ca.Key, nil
+	return cert, nil
 }
 
 // Clone creates a new certificate based the certificate c and signs it with the CA.
@@ -215,5 +216,20 @@ func (ca *CertificateAuthority) Clone(c *x509.Certificate) (*x509.Certificate, e
 		return nil, err
 	}
 
-	return x509.ParseCertificate(derCert)
+	cert, err := x509.ParseCertificate(derCert)
+	if err != nil {
+		return nil, err
+	}
+
+	return cert, nil
+}
+
+// TLSCert returns a certificate combined with a key for use in TLS.
+func (ca *CertificateAuthority) TLSCert(cert *x509.Certificate) *tls.Certificate {
+	return &tls.Certificate{
+		Certificate: [][]byte{
+			cert.Raw,
+		},
+		PrivateKey: ca.Key,
+	}
 }

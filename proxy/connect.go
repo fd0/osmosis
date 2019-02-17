@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -76,7 +75,8 @@ func writeConnectError(wr io.WriteCloser, err error) {
 
 // CertificateCreater creates a new certificate.
 type CertificateCreater interface {
-	NewCertificate(name string, altNames []string) (*x509.Certificate, *rsa.PrivateKey, error)
+	NewCertificate(name string, altNames []string) (*x509.Certificate, error)
+	TLSCert(*x509.Certificate) *tls.Certificate
 }
 
 // ServeConnect makes a connection to a target host and forwards all packets.
@@ -151,7 +151,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca CertificateCreater, er
 				name = data[0]
 			}
 
-			crt, key, err := ca.NewCertificate(name, []string{name})
+			crt, err := ca.NewCertificate(name, []string{name})
 			if err != nil {
 				return nil, err
 			}
@@ -159,14 +159,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, ca CertificateCreater, er
 			req.Log("new certificate names: %v", crt.DNSNames)
 			req.Log("new certificate ips: %v", crt.IPAddresses)
 
-			tlscrt := &tls.Certificate{
-				Certificate: [][]byte{
-					crt.Raw,
-				},
-				PrivateKey: key,
-			}
-
-			return tlscrt, nil
+			return ca.TLSCert(crt), nil
 		}
 
 		tlsConn := tls.Server(bconn, cfg)
