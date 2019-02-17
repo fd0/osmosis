@@ -181,8 +181,6 @@ func copyHeader(dst, src, trailer http.Header) {
 
 // ServeProxyRequest is called for each request the proxy receives.
 func (p *Proxy) ServeProxyRequest(req *Request) {
-	req.Log("%v %v %v %v", req.Request.Method, req.ForceScheme, req.ForceHost, req.Request.URL)
-
 	// handle websockets
 	if isWebsocketHandshake(req.Request) {
 		HandleUpgradeRequest(req, p.clientConfig)
@@ -201,7 +199,7 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 		return
 	}
 
-	req.Log("   -> %v", response.Status)
+	req.Log("%v %v %v", response.StatusCode, req.Request.Method, req.Request.URL)
 
 	copyHeader(req.ResponseWriter.Header(), response.Header, response.Trailer)
 	if len(response.Trailer) > 0 {
@@ -284,9 +282,6 @@ func isWebsocketHandshake(req *http.Request) bool {
 
 func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.Request) {
 	req := newRequest(responseWriter, httpRequest, p.logger, p.nextRequestID())
-	defer func() {
-		req.Log("done")
-	}()
 
 	// handle CONNECT requests for HTTPS
 	if req.Method == http.MethodConnect {

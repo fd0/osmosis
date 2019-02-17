@@ -77,7 +77,6 @@ func prepareWSHeader(src http.Header) http.Header {
 func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
 	reqUpgrade := req.Request.Header.Get("upgrade")
 	req.Log("handle upgrade request to %v", reqUpgrade)
-	defer req.Log("done")
 
 	// try to negotiate a websocket connection with the incoming request
 	var upgrader = websocket.Upgrader{
