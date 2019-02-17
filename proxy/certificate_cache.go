@@ -80,6 +80,10 @@ func (c *Cache) getOrCreate(addr, serverName string, f func() (*x509.Certificate
 
 	entry, ok := c.certs[key]
 	if ok {
+		// update timestamp
+		entry.T = time.Now()
+		c.certs[key] = entry
+
 		return entry.C, nil
 	}
 
@@ -147,7 +151,6 @@ func getCertificate(ctx context.Context, target, serverName string, clientConfig
 
 // Get returns a certificate from the cache, which is generated on demand.
 func (c *Cache) Get(ctx context.Context, addr, serverName string) (*tls.Certificate, error) {
-	c.log.Printf("Get cert for %v", addr)
 	name := strings.Split(addr, ":")[0]
 
 	crt, err := c.getOrCreate(addr, serverName, func() (*x509.Certificate, error) {
