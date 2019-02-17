@@ -208,10 +208,30 @@ func (ca *CertificateAuthority) NewCertificate(commonName string, names []string
 
 // Clone creates a new certificate based the certificate c and signs it with the CA.
 func (ca *CertificateAuthority) Clone(c *x509.Certificate) (*x509.Certificate, error) {
-	// make a shallow copy of c
-	var template = *c
+	template := &x509.Certificate{
+		SerialNumber: c.SerialNumber,
+		Subject:      c.Subject,
+		NotBefore:    c.NotBefore,
+		NotAfter:     c.NotAfter,
 
-	derCert, err := x509.CreateCertificate(rand.Reader, &template, ca.Certificate, ca.Key.Public(), ca.Key)
+		KeyUsage:    c.KeyUsage,
+		ExtKeyUsage: c.ExtKeyUsage,
+
+		Extensions:      c.Extensions,
+		ExtraExtensions: c.ExtraExtensions,
+
+		DNSNames:       c.DNSNames,
+		EmailAddresses: c.EmailAddresses,
+		IPAddresses:    c.IPAddresses,
+		URIs:           c.URIs,
+
+		BasicConstraintsValid: true,
+	}
+
+	template.Raw = nil
+	template.RawTBSCertificate = nil
+
+	derCert, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, ca.Key.Public(), ca.Key)
 	if err != nil {
 		return nil, err
 	}
