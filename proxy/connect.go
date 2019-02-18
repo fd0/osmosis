@@ -74,8 +74,6 @@ func writeConnectError(wr io.WriteCloser, err error) {
 // ServeConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
 func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
-	req.Log("CONNECT %v %v %v", req.ForceScheme, req.ForceHost, req.URL.Host)
-
 	hj, ok := req.ResponseWriter.(http.Hijacker)
 	if !ok {
 		req.SendError("unable to reuse connection for CONNECT")
