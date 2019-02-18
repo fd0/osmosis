@@ -217,8 +217,8 @@ func (ca *CertificateAuthority) Clone(c *x509.Certificate) (*x509.Certificate, e
 		KeyUsage:    c.KeyUsage,
 		ExtKeyUsage: c.ExtKeyUsage,
 
-		Extensions:      c.Extensions,
-		ExtraExtensions: c.ExtraExtensions,
+		Extensions:        c.Extensions,
+		PolicyIdentifiers: c.PolicyIdentifiers,
 
 		DNSNames:       c.DNSNames,
 		EmailAddresses: c.EmailAddresses,
@@ -227,6 +227,9 @@ func (ca *CertificateAuthority) Clone(c *x509.Certificate) (*x509.Certificate, e
 
 		BasicConstraintsValid: true,
 	}
+
+	// make sure that all extra attributes are included in the new cert
+	template.Subject.ExtraNames = template.Subject.Names
 
 	template.Raw = nil
 	template.RawTBSCertificate = nil
