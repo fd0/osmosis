@@ -2,9 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
+	"net/http/httputil"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/happal/osmosis/certauth"
@@ -30,6 +35,45 @@ func init() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error parsing flags: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+const logdir = "log"
+
+func warn(msg string, args ...interface{}) {
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
+	}
+	fmt.Fprintf(os.Stderr, msg, args...)
+}
+
+func saveRequest(id uint64, req *http.Request) {
+	buf, err := httputil.DumpRequest(req, false)
+	if err != nil {
+		warn("unable to dump request %v: %v\n", id, err)
+		return
+	}
+
+	filename := filepath.Join(logdir, fmt.Sprintf("%v.request", id))
+	err = ioutil.WriteFile(filename, buf, 0644)
+	if err != nil {
+		warn("unable to save request %v: %v\n", id, err)
+		return
+	}
+}
+
+func saveResponse(id uint64, res *http.Response) {
+	buf, err := httputil.DumpResponse(res, false)
+	if err != nil {
+		warn("unable to dump request %v: %v\n", id, err)
+		return
+	}
+
+	filename := filepath.Join(logdir, fmt.Sprintf("%v.response", id))
+	err = ioutil.WriteFile(filename, buf, 0644)
+	if err != nil {
+		warn("unable to save request %v: %v\n", id, err)
+		return
 	}
 }
 
@@ -70,6 +114,17 @@ func main() {
 		}
 	}()
 
-	proxy := proxy.New(opts.Listen, ca, nil)
-	log.Fatal(proxy.ListenAndServe())
+	p := proxy.New(opts.Listen, ca, nil)
+
+	err = os.MkdirAll(logdir, 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	p.OnResponse = func(req *proxy.Request, res *http.Response) {
+		saveRequest(req.ID, req.Request)
+		saveResponse(req.ID, res)
+	}
+
+	log.Fatal(p.ListenAndServe())
 }

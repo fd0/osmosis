@@ -34,6 +34,8 @@ type Proxy struct {
 	*certauth.CertificateAuthority
 	*Cache
 	Addr string
+
+	OnResponse func(*Request, *http.Response)
 }
 
 func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
@@ -200,6 +202,10 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 	}
 
 	req.Log("%v %v %v", response.StatusCode, req.Request.Method, req.Request.URL)
+
+	if p.OnResponse != nil {
+		p.OnResponse(req, response)
+	}
 
 	copyHeader(req.ResponseWriter.Header(), response.Header, response.Trailer)
 	if len(response.Trailer) > 0 {
