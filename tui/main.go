@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -83,11 +84,12 @@ func (g *OsmosisGui) viewerPage() *tview.Grid {
 func (g *OsmosisGui) overviewPage() *tview.Grid {
 	grid := tview.NewGrid().SetRows(-6, -1, 1)
 
-	table := g.requestsTable()
-	grid.AddItem(table, 0, 0, 1, 1, 0, 0, true)
-
+	// create logview first in case logging is done during setup
 	lv := g.logView()
 	grid.AddItem(lv, 1, 0, 1, 1, 0, 0, false)
+
+	table := g.requestsTable()
+	grid.AddItem(table, 0, 0, 1, 1, 0, 0, true)
 
 	statusBar := tview.NewTextView()
 	go func() {
@@ -110,6 +112,9 @@ func (g *OsmosisGui) requestsTable() *tview.Table {
 
 	table := tview.NewTable()
 	table.SetSelectedFunc(func(row int, column int) {
+		if g.requests == nil {
+			return
+		}
 		g.requestViewEvents <- g.requests[row-1]
 		g.pages.SwitchToPage("viewer")
 	})
@@ -296,7 +301,7 @@ func main() {
 	go func() {
 		for {
 			time.Sleep(time.Second)
-			log("foobar %v", time.Now())
+			log("[%v] %d Goroutines", time.Now(), runtime.NumGoroutine())
 		}
 	}()
 	err := gui.app.Run()
