@@ -132,7 +132,7 @@ func main() {
 		}
 	}()
 
-	p := proxy.New(opts.Listen, ca, nil)
+	p := proxy.New(opts.Listen, ca, nil, nil)
 
 	err = os.MkdirAll(opts.Logdir, 0755)
 	if err != nil {

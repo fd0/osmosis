@@ -68,8 +68,12 @@ func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 // New returns a new proxy which generates certificates on demand and signs
 // them with using ca. The clientConfig is used for outgoing TLS client
 // connections.
-func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config) *Proxy {
-	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lmicroseconds)
+func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config,
+	logWriter io.Writer) *Proxy {
+	if logWriter == nil {
+		logWriter = os.Stdout
+	}
+	logger := log.New(logWriter, "", log.Ldate|log.Ltime|log.Lmicroseconds)
 	proxy := &Proxy{
 		logger:               logger,
 		CertificateAuthority: ca,

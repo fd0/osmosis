@@ -29,7 +29,7 @@ func TestProxy(t testing.TB, cfg *tls.Config) (proxy *Proxy, serve, shutdown fun
 	ca := certauth.TestCA(t)
 	listener := newLocalListener(t)
 
-	proxy = New(listener.Addr().String(), ca, cfg)
+	proxy = New(listener.Addr().String(), ca, cfg, nil)
 
 	serve = func() {
 		err := proxy.Serve(listener)
