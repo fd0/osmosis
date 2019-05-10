@@ -23,7 +23,7 @@ import (
 
 // Request bundles an HTTP request and the corresponding response
 type Request struct {
-	ID int
+	ID uint64
 	*http.Request
 	*http.Response
 }
@@ -192,7 +192,7 @@ func (g *OsmosisGui) requestsTable() *tview.Table {
 	return table
 }
 
-func readRequest(dir string, id int) (*http.Request, error) {
+func readRequest(dir string, id uint64) (*http.Request, error) {
 	filename := filepath.Join(dir, fmt.Sprintf("%d.request", id))
 	f, err := os.Open(filename)
 	if err != nil {
@@ -214,7 +214,7 @@ func readRequest(dir string, id int) (*http.Request, error) {
 	return req, nil
 }
 
-func readResponse(dir string, id int) (*http.Response, error) {
+func readResponse(dir string, id uint64) (*http.Response, error) {
 	filename := filepath.Join(dir, fmt.Sprintf("%d.response", id))
 	f, err := os.Open(filename)
 	if err != nil {
@@ -239,7 +239,7 @@ func readResponse(dir string, id int) (*http.Response, error) {
 }
 
 func loadRequests(dir string) (reqs []Request, err error) {
-	id := 0
+	var id uint64
 	notfound := 0
 	for {
 		id++
@@ -327,13 +327,6 @@ func (g *OsmosisGui) logView() tview.Primitive {
 	return tv
 }
 
-func warn(msg string, args ...interface{}) {
-	if !strings.HasSuffix(msg, "\n") {
-		msg += "\n"
-	}
-	fmt.Fprintf(os.Stderr, msg, args...)
-}
-
 func saveRequest(id uint64, req *http.Request) {
 	req.RequestURI = req.URL.String()
 
@@ -361,14 +354,14 @@ func saveRequest(id uint64, req *http.Request) {
 func saveResponse(id uint64, res *http.Response) {
 	buf, err := httputil.DumpResponse(res, true)
 	if err != nil {
-		warn("unable to dump response %v: %v\n", id, err)
+		log("unable to dump response %v: %v\n", id, err)
 		return
 	}
 
 	filename := filepath.Join(opts.Logdir, fmt.Sprintf("%v.response", id))
 	err = ioutil.WriteFile(filename, buf, 0644)
 	if err != nil {
-		warn("unable to save response %v: %v\n", id, err)
+		log("unable to save response %v: %v\n", id, err)
 		return
 	}
 }
@@ -424,7 +417,7 @@ func main() {
 	}
 
 	p.OnResponse = func(req *proxy.Request, res *http.Response) {
-		var id int
+		var id uint64
 		if gui.requests != nil {
 			id = gui.requests[len(gui.requests)-1].ID + 1
 		}
@@ -434,8 +427,8 @@ func main() {
 			Response: res,
 		})
 		gui.newRequestEvent <- &gui.requests[len(gui.requests)-1]
-		saveRequest(req.ID, req.Request)
-		saveResponse(req.ID, res)
+		saveRequest(id, req.Request)
+		saveResponse(id, res)
 	}
 
 	go p.ListenAndServe()
