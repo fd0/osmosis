@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fd0/osmosis/certauth"
 	"github.com/gorilla/websocket"
-	"github.com/happal/osmosis/certauth"
 )
 
 func newWebsocketDialer(t testing.TB, proxyAddress string, ca *certauth.CertificateAuthority) *websocket.Dialer {

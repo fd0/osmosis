@@ -1,4 +1,4 @@
-module github.com/happal/osmosis
+module github.com/fd0/osmosis
 
 go 1.12
 

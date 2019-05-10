@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/happal/osmosis/certauth"
+	"github.com/fd0/osmosis/certauth"
 	"golang.org/x/net/context/ctxhttp"
 	"golang.org/x/net/http2"
 )

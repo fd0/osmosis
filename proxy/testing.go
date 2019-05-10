@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/happal/osmosis/certauth"
+	"github.com/fd0/osmosis/certauth"
 )
 
 // newLocalListener returns a new listener using a tcp port selected

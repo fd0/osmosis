@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/happal/osmosis/certauth"
+	"github.com/fd0/osmosis/certauth"
 )
 
 func testClient(t testing.TB, proxyAddress string, ca *certauth.CertificateAuthority) *http.Client {

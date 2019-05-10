@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/happal/osmosis/certauth"
+	"github.com/fd0/osmosis/certauth"
 )
 
 // cacheEntry bundles a certificate and a timestamp.

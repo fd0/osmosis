@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/happal/osmosis/certauth"
-	"github.com/happal/osmosis/proxy"
+	"github.com/fd0/osmosis/certauth"
+	"github.com/fd0/osmosis/proxy"
 	"github.com/spf13/pflag"
 )
 
