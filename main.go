@@ -14,6 +14,7 @@ import (
 
 	"github.com/fd0/osmosis/certauth"
 	"github.com/fd0/osmosis/proxy"
+	"github.com/fd0/osmosis/tui"
 	"github.com/spf13/pflag"
 )
 
@@ -22,6 +23,7 @@ type Options struct {
 	CertificateFilename, KeyFilename string
 	Listen                           string
 	Logdir                           string
+	NoGui                            bool
 }
 
 var opts Options
@@ -32,6 +34,7 @@ func init() {
 	fs.StringVar(&opts.KeyFilename, "key", "ca.key", "read private key from `file`")
 	fs.StringVar(&opts.Listen, "listen", "[::1]:8080", "listen at `addr`")
 	fs.StringVar(&opts.Logdir, "log-dir", "", "set log `directory` (default: log-YYYMMMDDD-HHMMSS)")
+	fs.BoolVar(&opts.NoGui, "no-gui", false, "Disable graphical user interface")
 
 	err := fs.Parse(os.Args)
 	if err != nil {
@@ -52,7 +55,7 @@ func warn(msg string, args ...interface{}) {
 }
 
 func saveRequest(id uint64, req *http.Request) {
-	fmt.Printf("dump request for %v %v\n", req.URL, req.RequestURI)
+	// fmt.Printf("dump request for %v %v\n", req.URL, req.RequestURI)
 	req.RequestURI = req.URL.String()
 
 	// buf, err := httputil.DumpRequestOut(req, true)
@@ -108,41 +111,74 @@ func main() {
 		}
 	}
 
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-
-	log.Printf("CA loaded: %v\n", ca.Certificate.Subject)
-
-	log.Printf("logging requests to directory %q", opts.Logdir)
-
 	// cfg := &tls.Config{
 	// 	InsecureSkipVerify: true,
 	// }
-
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		var last int
-		for range ticker.C {
-			var cur = runtime.NumGoroutine()
-			if cur != last {
-				log.Printf("%d active goroutines", cur)
-				last = cur
-			}
-		}
-	}()
-
-	p := proxy.New(opts.Listen, ca, nil, nil)
 
 	err = os.MkdirAll(opts.Logdir, 0755)
 	if err != nil {
 		panic(err)
 	}
 
-	p.OnResponse = func(req *proxy.Request, res *http.Response) {
-		saveRequest(req.ID, req.Request)
-		saveResponse(req.ID, res)
+	if opts.NoGui {
+		p := proxy.New(opts.Listen, ca, nil, nil)
+		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+		log.Printf("CA loaded: %v\n", ca.Certificate.Subject)
+		log.Printf("logging requests to directory %q", opts.Logdir)
+
+		p.OnResponse = func(req *proxy.Request, res *http.Response) {
+			log.Printf("dump request for %v %v\n", req.Request.URL, req.Request.RequestURI)
+			saveRequest(req.ID, req.Request)
+			saveResponse(req.ID, res)
+		}
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+
+			var last int
+			for range ticker.C {
+				var cur = runtime.NumGoroutine()
+				if cur != last {
+					log.Printf("%d active goroutines", cur)
+					last = cur
+				}
+			}
+		}()
+
+		log.Fatal(p.ListenAndServe())
+	} else {
+		ui := tui.New(opts.Logdir)
+		p := proxy.New(opts.Listen, ca, nil, ui.LogView)
+
+		p.OnResponse = func(req *proxy.Request, res *http.Response) {
+			var id uint64
+			if ui.Requests != nil {
+				id = ui.Requests[len(ui.Requests)-1].ID + 1
+			}
+			ui.AppendToHistory(tui.Request{
+				ID:       id,
+				Request:  req.Request,
+				Response: res,
+			})
+			fmt.Fprintf(ui.LogView, "dump request for %v %v\n", req.Request.URL,
+				req.Request.RequestURI)
+			saveRequest(id, req.Request)
+			saveResponse(id, res)
+
+		}
+		go func() {
+			err := p.ListenAndServe()
+			fmt.Fprintf(ui.LogView, "[red::bu]Proxy Stopped:[::-] %s[-::]\n", err.Error())
+			fmt.Fprintf(ui.LogView, "Press [yellow::b]q[-::-] to exit...")
+			ui.MainView.SwitchToPage("log")
+			ui.App.SetFocus(ui.LogView)
+		}()
+
+		err = ui.App.Run()
+		if err != nil {
+			panic(err)
+		}
+
 	}
 
-	log.Fatal(p.ListenAndServe())
 }
