@@ -35,7 +35,8 @@ type Proxy struct {
 	*Cache
 	Addr string
 
-	OnResponse func(*Request, *http.Response)
+	OnResponse    func(*Request, *http.Response)
+	InterceptHook func(*http.Request) *http.Request
 }
 
 func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
@@ -197,6 +198,10 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 	if err != nil {
 		req.SendError("error preparing request: %v", err)
 		return
+	}
+
+	if p.InterceptHook != nil {
+		clientRequest = p.InterceptHook(clientRequest)
 	}
 
 	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
