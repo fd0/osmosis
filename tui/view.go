@@ -30,9 +30,9 @@ func (t *Tui) selectViewedRequest(selected *Request) {
 func (t *Tui) setupRequestView() *requestView {
 	grid := tview.NewGrid().SetColumns(-1, -1)
 	requestField := tview.NewTextView()
-	requestField.SetBorder(true).SetTitle("Request")
+	requestField.SetBorder(true).SetTitle("[::b] Request [::-]")
 	responseField := tview.NewTextView()
-	responseField.SetBorder(true).SetTitle("Response")
+	responseField.SetBorder(true).SetTitle("[::b] Response [::-]")
 	grid.AddItem(requestField, 0, 0, 1, 1, 0, 0, false)
 	grid.AddItem(responseField, 0, 1, 1, 1, 0, 0, false)
 	return &requestView{

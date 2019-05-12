@@ -9,7 +9,7 @@ import (
 
 func (t *Tui) setupLog() *tview.TextView {
 	logView := tview.NewTextView()
-	logView.SetBorder(true).SetTitle("log")
+	logView.SetBorder(true).SetTitle("[::b] Log [::-]")
 	logView.SetDynamicColors(true)
 	logView.SetChangedFunc(func() {
 		t.App.Draw()
