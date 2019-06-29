@@ -3,4 +3,4 @@
 *.pem
 /osmosis
 /tui/tui
-/log*
+**/log-*
