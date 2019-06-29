@@ -218,7 +218,7 @@ func (s *TxnStore) MaxID() (max uint64, e error) {
 		it := txn.NewIterator(opts)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
-			key, err := parseKey(it.Item().Key())
+			key, err := ParseKey(it.Item().Key())
 			if err != nil {
 				return err
 			}
@@ -246,7 +246,7 @@ func (s *TxnStore) TxnSummaries() ([]*TxnSummary, error) {
 
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
-			key, err := parseKey(item.Key())
+			key, err := ParseKey(item.Key())
 			if err != nil {
 				return err
 			}

@@ -12,8 +12,8 @@ type KeyType string
 
 // These constants define the key structure of the store.
 const (
-	// Template is the key template to be filled with ID,
-	// ?Kind and EditedPostfix/OriginalPostfix in that order.
+	// KeyTemplate is the key template to be filled with ID,
+	// KeyType and EditedPostfix/OriginalPostfix in that order.
 	KeyTemplate             = "%d-%s-%s"
 	ReqType         KeyType = "Req"
 	ResType         KeyType = "Res"
@@ -42,7 +42,8 @@ func (k Key) Bytes() []byte {
 	return []byte(fmt.Sprintf(KeyTemplate, k.ID, k.Type, postfix))
 }
 
-func parseKey(storeKey []byte) (key *Key, err error) {
+// ParseKey creates a Key object from the bytes of the actual key.
+func ParseKey(storeKey []byte) (key *Key, err error) {
 	matches := KeyRegex.FindStringSubmatch(string(storeKey))
 	if len(matches) != 4 {
 		return nil, fmt.Errorf("could not parse key: %s (%v)", string(storeKey), matches)
