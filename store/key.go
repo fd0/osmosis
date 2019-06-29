@@ -7,10 +7,10 @@ import (
 )
 
 // KeyType is used to distinguish between requests and responses
-// in store keys
+// in store keys.
 type KeyType string
 
-// These constants define the key structure of the store
+// These constants define the key structure of the store.
 const (
 	// Template is the key template to be filled with ID,
 	// ?Kind and EditedPostfix/OriginalPostfix in that order.
@@ -21,11 +21,11 @@ const (
 	OriginalPostfix         = "O"
 )
 
-// KeyRegex is the regex used to extract info from a key in the KeyTemplate form
+// KeyRegex is the regex used to extract info from a key in the KeyTemplate form.
 var KeyRegex = regexp.MustCompile(`^(\d+)-(.+)-(.+)$`)
 
 // Key represents the elements that are serialized to the
-// actual store key
+// actual store key.
 type Key struct {
 	ID     uint64
 	Type   KeyType
@@ -33,7 +33,7 @@ type Key struct {
 }
 
 // Bytes serializes the Key struct such that it can be used
-// as an actual store key
+// as an actual store key.
 func (k Key) Bytes() []byte {
 	postfix := OriginalPostfix
 	if k.Edited {
@@ -70,5 +70,6 @@ func parseKey(storeKey []byte) (key *Key, err error) {
 	} else {
 		return nil, fmt.Errorf("invalid edited postfix: %s", postfix)
 	}
+
 	return key, nil
 }
