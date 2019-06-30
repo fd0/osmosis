@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"sort"
 
 	"github.com/dgraph-io/badger"
@@ -28,7 +29,7 @@ type TxnSummary struct {
 	Host        string
 	Method      string
 	StatusCode  int
-	Path        string
+	URL         *url.URL
 	ReqEdited   bool
 	ResEdited   bool
 	HasResponse bool
@@ -150,14 +151,14 @@ func (s *TxnStore) GetSummary(id uint64) (*TxnSummary, error) {
 
 	summary.Host = req.Host
 	summary.Method = req.Method
-	summary.Path = req.URL.String()
+	summary.URL = req.URL
 
 	req, err = s.GetRequest(id, true)
 	if err == nil {
 		summary.ReqEdited = true
 		summary.Host = req.Host
 		summary.Method = req.Method
-		summary.Path = req.URL.String()
+		summary.URL = req.URL
 	} else if err != badger.ErrKeyNotFound {
 		return nil, err
 	}
@@ -275,8 +276,8 @@ func (s *TxnStore) TxnSummaries() ([]*TxnSummary, error) {
 				if key.Edited || summary.Method == "" {
 					summary.Method = req.Method
 				}
-				if key.Edited || summary.Path == "" {
-					summary.Path = req.URL.String()
+				if key.Edited || summary.URL == nil {
+					summary.URL = req.URL
 				}
 			case ResType: // response
 				res, err := parseResponse(item)
