@@ -35,9 +35,12 @@ type Proxy struct {
 	*Cache
 	Addr string
 
-	OnResponse    func(*Request, *http.Response)
-	InterceptHook func(*http.Request) *http.Request
+	roundTripPipeline PipelineFunc
 }
+
+// PipelineFunc is a wrapper around ForwardRequest that is derived
+// from the functions received through the Register function.
+type PipelineFunc func(*Request) (*http.Response, error)
 
 func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 	// initialize HTTP client
@@ -103,6 +106,11 @@ func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Co
 	return proxy
 }
 
+// Log exposes the proxy's logger to the user
+func (p *Proxy) Log(msg string, args ...interface{}) {
+	p.logger.Printf(msg, args...)
+}
+
 // filterHeaders contains a list of (lower-case) header names received from the
 // client which are not sent to the upstream server.
 var filterHeaders = map[string]struct{}{
@@ -125,17 +133,17 @@ type bufferedReadCloser struct {
 	io.Closer
 }
 
-func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Request, error) {
-	url := proxyRequest.URL
-	if host != "" {
-		url.Scheme = scheme
-		url.Host = host
+func (r *Request) prepare() error {
+	url := r.Request.URL
+	if r.ForceHost != "" {
+		url.Scheme = r.ForceScheme
+		url.Host = r.ForceHost
 	}
 
 	// try to find out if the body is non-nil but won't yield any data
-	var body = proxyRequest.Body
-	if proxyRequest.Body != nil {
-		rd := bufio.NewReader(proxyRequest.Body)
+	var body = r.Request.Body
+	if r.Request.Body != nil {
+		rd := bufio.NewReader(r.Request.Body)
 		buf, err := rd.Peek(1)
 		if err == io.EOF || len(buf) == 0 {
 			// if the body is non-nil but nothing can be read from it we set the body to http.NoBody
@@ -144,20 +152,20 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 		} else {
 			body = bufferedReadCloser{
 				Reader: rd,
-				Closer: proxyRequest.Body,
+				Closer: r.Request.Body,
 			}
 		}
 	}
 
-	req, err := http.NewRequest(proxyRequest.Method, url.String(), body)
+	req, err := http.NewRequestWithContext(r.Request.Context(), r.Request.Method, url.String(), body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// use Host header from received request
-	req.Host = proxyRequest.Host
+	req.Host = r.Request.Host
 
-	for name, values := range proxyRequest.Header {
+	for name, values := range r.Request.Header {
 		if _, ok := filterHeaders[strings.ToLower(name)]; ok {
 			// header is filtered, do not send it to the upstream server
 			continue
@@ -169,9 +177,10 @@ func prepareRequest(proxyRequest *http.Request, host, scheme string) (*http.Requ
 		req.Header[name] = values
 	}
 
-	req.ContentLength = proxyRequest.ContentLength
+	req.ContentLength = r.Request.ContentLength
 
-	return req, nil
+	r.Request = req
+	return nil
 }
 
 func copyHeader(dst, src, trailer http.Header) {
@@ -194,26 +203,16 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 		return
 	}
 
-	clientRequest, err := prepareRequest(req.Request, req.ForceHost, req.ForceScheme)
+	err := req.prepare()
 	if err != nil {
 		req.SendError("error preparing request: %v", err)
 		return
 	}
 
-	if p.InterceptHook != nil {
-		clientRequest = p.InterceptHook(clientRequest)
-	}
-
-	response, err := ctxhttp.Do(req.Context(), p.client, clientRequest)
+	response, err := p.ForwardThroughPipeline(req)
 	if err != nil {
 		req.SendError("error executing request: %v", err)
 		return
-	}
-
-	req.Log("%v %v %v", response.StatusCode, req.Request.Method, req.Request.URL)
-
-	if p.OnResponse != nil {
-		p.OnResponse(req, response)
 	}
 
 	copyHeader(req.ResponseWriter.Header(), response.Header, response.Trailer)
@@ -250,6 +249,49 @@ func (p *Proxy) ServeProxyRequest(req *Request) {
 	}
 }
 
+// ForwardRequest performs the given request using the proxy's http client.
+// This function is also the core of the roundtrip pipeline.
+func (p *Proxy) ForwardRequest(request *Request) (*http.Response, error) {
+	response, err := ctxhttp.Do(request.Context(), p.client, request.Request)
+	if err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+// ForwardThroughPipeline executes the round trip pipeline and handles the case where
+// no pipeline function has been registred using the bare ForwardRequest function as
+// a default.
+func (p *Proxy) ForwardThroughPipeline(request *Request) (*http.Response, error) {
+	if p.roundTripPipeline == nil {
+		p.roundTripPipeline = p.ForwardRequest
+	}
+	return p.roundTripPipeline(request)
+}
+
+// Register registers the given function in the proxy roundtrip pipeline
+func (p *Proxy) Register(f func(*Request, PipelineFunc) (*http.Response, error)) {
+	// the core of the pipeline (i.e. the innermost function) is ForwardRequest
+	// all registered functions are wrapping layers around this initial value of
+	// the roundTripPipeline
+	if p.roundTripPipeline == nil {
+		p.roundTripPipeline = p.ForwardRequest
+	}
+
+	// the anonymous function scope is used to create copies
+	func(pipelineCopy func(*Request) (*http.Response, error)) {
+		// now the function f will be wrapped around the current pipeline
+		// also context checking is applied together with f
+		p.roundTripPipeline = func(r *Request) (*http.Response, error) {
+			err := r.Context().Err()
+			if err != nil {
+				return nil, err
+			}
+			return f(r, pipelineCopy)
+		}
+	}(p.roundTripPipeline)
+}
+
 // Request is a request received by the proxy.
 type Request struct {
 	ID uint64
@@ -263,17 +305,17 @@ type Request struct {
 }
 
 // Log logs a message through the embedded logger, prefixed with the request.
-func (req *Request) Log(msg string, args ...interface{}) {
-	args = append([]interface{}{req.ID, req.Request.RemoteAddr}, args...)
-	req.Logger.Printf("[%4d %v] "+msg, args...)
+func (r *Request) Log(msg string, args ...interface{}) {
+	args = append([]interface{}{r.ID, r.Request.RemoteAddr}, args...)
+	r.Logger.Printf("[%4d %v] "+msg, args...)
 }
 
 // SendError responds with an error (which is also logged).
-func (req *Request) SendError(msg string, args ...interface{}) {
-	req.Log(msg, args...)
-	req.ResponseWriter.Header().Set("Content-Type", "text/plain")
-	req.ResponseWriter.WriteHeader(http.StatusInternalServerError)
-	fmt.Fprintf(req.ResponseWriter, msg, args...)
+func (r *Request) SendError(msg string, args ...interface{}) {
+	r.Log(msg, args...)
+	r.ResponseWriter.Header().Set("Content-Type", "text/plain")
+	r.ResponseWriter.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprintf(r.ResponseWriter, msg, args...)
 }
 
 func (p *Proxy) nextRequestID() uint64 {
@@ -316,6 +358,7 @@ func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.
 
 // ListenAndServe starts the listener and runs the proxy.
 func (p *Proxy) ListenAndServe() error {
+	p.logger.Printf("Listening on %s\n", p.server.Addr)
 	listener, err := net.Listen("tcp", p.server.Addr)
 	if err != nil {
 		return err

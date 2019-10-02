@@ -71,8 +71,8 @@ func TestStore(t *testing.T) {
 
 	var store *TxnStore
 
-	t.Run("NewTxnStore", func(t *testing.T) {
-		store, err = NewTxnStore(dir)
+	t.Run("New", func(t *testing.T) {
+		store, err = New(dir)
 		if err != nil {
 			t.Fatalf("store creating failed: %s", err)
 		}

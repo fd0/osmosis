@@ -43,8 +43,8 @@ type TxnStore struct {
 	OnUpdate func(uint64)
 }
 
-// NewTxnStore returns a pointer to a new TxnStore.
-func NewTxnStore(storeDir string) (*TxnStore, error) {
+// New returns a new TxnStore.
+func New(storeDir string) (*TxnStore, error) {
 	opts := badger.DefaultOptions
 	opts.Dir = storeDir
 	opts.ValueDir = storeDir
