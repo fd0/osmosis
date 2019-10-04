@@ -73,22 +73,22 @@ func writeConnectError(wr io.WriteCloser, err error) {
 
 // ServeConnect makes a connection to a target host and forwards all packets.
 // If an error is returned, hijacking the connection hasn't worked.
-func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Request)) {
-	hj, ok := req.ResponseWriter.(http.Hijacker)
+func ServeConnect(event *Event, tlsConfig *tls.Config, certCache *Cache, errorLogger *log.Logger, nextRequestID func() uint64, serveProxyRequest func(*Event)) {
+	hj, ok := event.ResponseWriter.(http.Hijacker)
 	if !ok {
-		req.SendError("unable to reuse connection for CONNECT")
+		event.SendError("unable to reuse connection for CONNECT")
 		return
 	}
 
 	conn, rw, err := hj.Hijack()
 	if err != nil {
-		req.SendError("reusing connection failed: %v", err)
+		event.SendError("reusing connection failed: %v", err)
 		return
 	}
 
 	err = rw.Flush()
 	if err != nil {
-		req.Log("flush failed: %v", err)
+		event.Log("flush failed: %v", err)
 		writeConnectError(conn, err)
 		conn.Close()
 		return
@@ -96,7 +96,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 
 	err = writeConnectSuccess(conn)
 	if err != nil {
-		req.Log("unable to write proxy response: %v", err)
+		event.Log("unable to write proxy response: %v", err)
 		writeConnectError(conn, err)
 		conn.Close()
 		return
@@ -110,7 +110,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 
 	buf, err := bconn.Peek(1)
 	if err != nil {
-		req.Log("peek(1) failed: %v", err)
+		event.Log("peek(1) failed: %v", err)
 		conn.Close()
 		return
 	}
@@ -120,12 +120,12 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 		addr: conn.RemoteAddr(),
 	}
 
-	var forceHost = req.URL.Host
-	if req.ForceHost != "" {
-		forceHost = req.ForceHost
+	var forceHost = event.Req.URL.Host
+	if event.ForceHost != "" {
+		forceHost = event.ForceHost
 	}
 	var forceScheme string
-	var parentID = req.ID
+	var parentID = event.ID
 
 	// TLS client hello starts with 0x16
 	if buf[0] == 0x16 {
@@ -135,14 +135,14 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 
 		// generate a new certificate on the fly for the client
 		cfg.GetCertificate = func(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return certCache.Get(req.Request.Context(), forceHost, ch.ServerName)
+			return certCache.Get(event.Req.Context(), forceHost, ch.ServerName)
 		}
 
 		tlsConn := tls.Server(bconn, cfg)
 
 		err = tlsConn.Handshake()
 		if err != nil {
-			req.Log("TLS handshake for %v failed: %v", req.URL.Host, err)
+			event.Log("TLS handshake for %v failed: %v", event.Req.URL.Host, err)
 			return
 		}
 
@@ -167,7 +167,7 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 		forceScheme = "http"
 	}
 
-	logger := req.Logger
+	logger := event.Logger
 
 	srv := &http.Server{
 		ErrorLog: errorLogger,
@@ -176,12 +176,12 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 			if nextID == 0 {
 				nextID = nextRequestID()
 			}
-			preq := newRequest(res, req, logger, nextID)
+			event := newEvent(res, req, logger, nextID)
 			// send all requests to the host we were told to connect to
-			preq.ForceHost = forceHost
-			preq.ForceScheme = forceScheme
+			event.ForceHost = forceHost
+			event.ForceScheme = forceScheme
 
-			serveProxyRequest(preq)
+			serveProxyRequest(event)
 		}),
 	}
 
@@ -192,6 +192,6 @@ func ServeConnect(req *Request, tlsConfig *tls.Config, certCache *Cache, errorLo
 	}
 
 	if err != nil {
-		req.Log("error serving connection: %v", err)
+		event.Log("error serving connection: %v", err)
 	}
 }

@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -35,12 +33,12 @@ type Proxy struct {
 	*Cache
 	Addr string
 
-	roundTripPipeline PipelineFunc
+	roundTripPipeline EventHook
 }
 
-// PipelineFunc is a wrapper around ForwardRequest that is derived
+// EventHook is a wrapper around ForwardRequest that is derived
 // from the functions received through the Register function.
-type PipelineFunc func(*Request) (*http.Response, error)
+type EventHook func(*Event) (*Response, error)
 
 func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 	// initialize HTTP client
@@ -133,56 +131,6 @@ type bufferedReadCloser struct {
 	io.Closer
 }
 
-func (r *Request) prepare() error {
-	url := r.Request.URL
-	if r.ForceHost != "" {
-		url.Scheme = r.ForceScheme
-		url.Host = r.ForceHost
-	}
-
-	// try to find out if the body is non-nil but won't yield any data
-	var body = r.Request.Body
-	if r.Request.Body != nil {
-		rd := bufio.NewReader(r.Request.Body)
-		buf, err := rd.Peek(1)
-		if err == io.EOF || len(buf) == 0 {
-			// if the body is non-nil but nothing can be read from it we set the body to http.NoBody
-			// this happens for incoming http2 connections
-			body = http.NoBody
-		} else {
-			body = bufferedReadCloser{
-				Reader: rd,
-				Closer: r.Request.Body,
-			}
-		}
-	}
-
-	req, err := http.NewRequestWithContext(r.Request.Context(), r.Request.Method, url.String(), body)
-	if err != nil {
-		return err
-	}
-
-	// use Host header from received request
-	req.Host = r.Request.Host
-
-	for name, values := range r.Request.Header {
-		if _, ok := filterHeaders[strings.ToLower(name)]; ok {
-			// header is filtered, do not send it to the upstream server
-			continue
-		}
-
-		if newname, ok := renameHeaders[strings.ToLower(name)]; ok {
-			name = newname
-		}
-		req.Header[name] = values
-	}
-
-	req.ContentLength = r.Request.ContentLength
-
-	r.Request = req
-	return nil
-}
-
 func copyHeader(dst, src, trailer http.Header) {
 	for name, values := range src {
 		for _, value := range values {
@@ -196,81 +144,85 @@ func copyHeader(dst, src, trailer http.Header) {
 }
 
 // ServeProxyRequest is called for each request the proxy receives.
-func (p *Proxy) ServeProxyRequest(req *Request) {
+func (p *Proxy) ServeProxyRequest(event *Event) {
 	// handle websockets
-	if isWebsocketHandshake(req.Request) {
-		HandleUpgradeRequest(req, p.clientConfig)
+	if isWebsocketHandshake(event.Req) {
+		HandleUpgradeRequest(event, p.clientConfig)
 		return
 	}
 
-	err := req.prepare()
+	err := event.prepareRequest()
 	if err != nil {
-		req.SendError("error preparing request: %v", err)
+		event.SendError("error preparing requests: %v", err)
 		return
 	}
 
-	response, err := p.ForwardThroughPipeline(req)
+	response, err := p.ForwardThroughPipeline(event)
 	if err != nil {
-		req.SendError("error executing request: %v", err)
+		event.SendError("error executing request: %v", err)
 		return
 	}
 
-	copyHeader(req.ResponseWriter.Header(), response.Header, response.Trailer)
+	copyHeader(event.ResponseWriter.Header(), response.Header, response.Trailer)
 	if len(response.Trailer) > 0 {
-		req.Log("trailer detected, announcing: %v", response.Trailer)
+		event.Log("trailer detected, announcing: %v", response.Trailer)
 		names := make([]string, 0, len(response.Trailer))
 		for name := range response.Trailer {
 			names = append(names, name)
 		}
 
 		// announce the trailers to the client
-		req.ResponseWriter.Header().Set("Trailer", strings.Join(names, ", "))
+		event.ResponseWriter.Header().Set("Trailer", strings.Join(names, ", "))
 	}
 
-	req.ResponseWriter.WriteHeader(response.StatusCode)
+	event.ResponseWriter.WriteHeader(response.StatusCode)
 
-	_, err = io.Copy(req.ResponseWriter, response.Body)
+	_, err = io.Copy(event.ResponseWriter, response.Body)
 	if err != nil {
-		req.Log("error copying body: %v", err)
+		event.Log("error copying body: %v", err)
 		return
 	}
 
 	err = response.Body.Close()
 	if err != nil {
-		req.Log("error closing body: %v", err)
+		event.Log("error closing body: %v", err)
 		return
 	}
 
 	// send the trailer values
 	for name, values := range response.Trailer {
 		for _, value := range values {
-			req.ResponseWriter.Header().Add(name, value)
+			event.ResponseWriter.Header().Add(name, value)
 		}
 	}
 }
 
 // ForwardRequest performs the given request using the proxy's http client.
 // This function is also the core of the roundtrip pipeline.
-func (p *Proxy) ForwardRequest(request *Request) (*http.Response, error) {
-	response, err := ctxhttp.Do(request.Context(), p.client, request.Request)
+func (p *Proxy) ForwardRequest(event *Event) (*Response, error) {
+	httpResponse, err := ctxhttp.Do(event.Req.Context(), p.client, event.Req)
 	if err != nil {
 		return nil, err
 	}
-	return response, nil
+	return &Response{httpResponse}, nil
 }
 
 // ForwardThroughPipeline executes the round trip pipeline and handles the case where
 // no pipeline function has been registred using the bare ForwardRequest function as
 // a default.
-func (p *Proxy) ForwardThroughPipeline(request *Request) (*http.Response, error) {
+func (p *Proxy) ForwardThroughPipeline(event *Event) (*http.Response, error) {
 	if p.roundTripPipeline == nil {
 		p.roundTripPipeline = p.ForwardRequest
 	}
-	return p.roundTripPipeline(request)
+	response, err := p.roundTripPipeline(event)
+	if err != nil {
+		return nil, err
+	}
+	return response.Response, nil
 }
 
 // Register registers the given function in the proxy roundtrip pipeline
-func (p *Proxy) Register(f func(*Request, PipelineFunc) (*http.Response, error)) {
+func (p *Proxy) Register(funcs ...func(*Event) (*Response, error)) {
 	// the core of the pipeline (i.e. the innermost function) is ForwardRequest
 	// all registered functions are wrapping layers around this initial value of
 	// the roundTripPipeline
@@ -278,57 +230,34 @@ func (p *Proxy) Register(f func(*Request, PipelineFunc) (*http.Response, error))
 		p.roundTripPipeline = p.ForwardRequest
 	}
 
-	// the anonymous function scope is used to create copies
-	func(pipelineCopy func(*Request) (*http.Response, error)) {
-		// now the function f will be wrapped around the current pipeline
-		// also context checking is applied together with f
-		p.roundTripPipeline = func(r *Request) (*http.Response, error) {
-			err := r.Context().Err()
-			if err != nil {
-				return nil, err
+	for _, f := range funcs {
+		// the anonymous function scope is used to create copies of the state
+		// of f and p.roundTripPipeline in this loop iteration
+		func(pipelineCopy func(*Event) (*Response, error),
+			funcCopy func(*Event) (*Response, error)) {
+			// now the function f will be wrapped around the current pipeline
+			p.roundTripPipeline = func(e *Event) (*Response, error) {
+				e.ForwardRequest = func() (*Response, error) {
+					return pipelineCopy(e)
+				}
+				response, err := funcCopy(e)
+				if err != nil {
+					return nil, err
+				}
+				return response, nil
 			}
-			return f(r, pipelineCopy)
-		}
-	}(p.roundTripPipeline)
+		}(p.roundTripPipeline, f)
+
+	}
 }
 
-// Request is a request received by the proxy.
-type Request struct {
-	ID uint64
-
-	*http.Request
-	http.ResponseWriter
-
-	ForceHost, ForceScheme string
-
-	*log.Logger
-}
-
-// Log logs a message through the embedded logger, prefixed with the request.
-func (r *Request) Log(msg string, args ...interface{}) {
-	args = append([]interface{}{r.ID, r.Request.RemoteAddr}, args...)
-	r.Logger.Printf("[%4d %v] "+msg, args...)
-}
-
-// SendError responds with an error (which is also logged).
-func (r *Request) SendError(msg string, args ...interface{}) {
-	r.Log(msg, args...)
-	r.ResponseWriter.Header().Set("Content-Type", "text/plain")
-	r.ResponseWriter.WriteHeader(http.StatusInternalServerError)
-	fmt.Fprintf(r.ResponseWriter, msg, args...)
+// ResetPipeline removes all previously registered functions from the pipeline
+func (p *Proxy) ResetPipeline() {
+	p.roundTripPipeline = p.ForwardRequest
 }
 
 func (p *Proxy) nextRequestID() uint64 {
 	return atomic.AddUint64(&p.requestID, 1)
-}
-
-func newRequest(rw http.ResponseWriter, req *http.Request, logger *log.Logger, id uint64) *Request {
-	return &Request{
-		ID:             id,
-		Request:        req,
-		ResponseWriter: rw,
-		Logger:         logger,
-	}
 }
 
 // isWebsocketHandshake returns true if the request tries to initiate a websocket handshake.
@@ -338,22 +267,22 @@ func isWebsocketHandshake(req *http.Request) bool {
 }
 
 func (p *Proxy) ServeHTTP(responseWriter http.ResponseWriter, httpRequest *http.Request) {
-	req := newRequest(responseWriter, httpRequest, p.logger, p.nextRequestID())
+	event := newEvent(responseWriter, httpRequest, p.logger, p.nextRequestID())
 
 	// handle CONNECT requests for HTTPS
-	if req.Method == http.MethodConnect {
-		ServeConnect(req, p.serverConfig, p.Cache, p.logger, p.nextRequestID, p.ServeProxyRequest)
+	if event.Req.Method == http.MethodConnect {
+		ServeConnect(event, p.serverConfig, p.Cache, p.logger, p.nextRequestID, p.ServeProxyRequest)
 		return
 	}
 
 	// serve certificate for easier importing
-	if req.URL.Hostname() == "proxy" {
-		ServeStatic(req.ResponseWriter, req.Request, p.CertificateAuthority.CertificateAsPEM())
+	if event.Req.URL.Hostname() == "proxy" {
+		ServeStatic(event.ResponseWriter, event.Req, p.CertificateAuthority.CertificateAsPEM())
 		return
 	}
 
 	// handle all other requests
-	p.ServeProxyRequest(req)
+	p.ServeProxyRequest(event)
 }
 
 // ListenAndServe starts the listener and runs the proxy.

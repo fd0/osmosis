@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -85,24 +84,21 @@ func main() {
 	}
 
 	p := proxy.New(opts.Listen, ca, nil, nil)
-	// store, err := store.New(opts.Logdir)
-	// if err != nil {
-	// 	log.Println(err)
-	// 	return
-	// }
 
-	p.Register(func(req *proxy.Request, forward proxy.PipelineFunc) (*http.Response, error) {
-		res, err := forward(req)
+	// Event logging demo
+	p.Register(func(event *proxy.Event) (*proxy.Response, error) {
+		res, err := event.ForwardRequest()
 		if err != nil {
 			return nil, err
 		}
-		req.Log("%v %v %v %v\n", res.StatusCode, req.Method, req.URL, req.Proto)
+		event.Log("%v %v %v %v\n", res.StatusCode, event.Req.Method, event.Req.URL, event.Req.Proto)
 		return res, err
 	})
 
-	p.Register(func(req *proxy.Request, forward proxy.PipelineFunc) (*http.Response, error) {
-		req.Request.Header["User-Agent"] = []string{"Osmosis Proxy"}
-		return forward(req)
+	// Header reqrite demo
+	p.Register(func(event *proxy.Event) (*proxy.Response, error) {
+		event.Req.Header["User-Agent"] = []string{"Osmosis Proxy"}
+		return event.ForwardRequest()
 	})
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)

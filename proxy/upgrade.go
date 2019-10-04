@@ -74,9 +74,9 @@ func prepareWSHeader(src http.Header) http.Header {
 }
 
 // HandleUpgradeRequest handles an upgraded connection (e.g. websockets).
-func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
-	reqUpgrade := req.Request.Header.Get("upgrade")
-	req.Log("handle upgrade request to %v", reqUpgrade)
+func HandleUpgradeRequest(event *Event, clientConfig *tls.Config) {
+	reqUpgrade := event.Req.Header.Get("upgrade")
+	event.Log("handle upgrade request to %v", reqUpgrade)
 
 	// try to negotiate a websocket connection with the incoming request
 	var upgrader = websocket.Upgrader{
@@ -87,27 +87,27 @@ func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
 		CheckOrigin: func(*http.Request) bool { return true },
 	}
 
-	inConn, err := upgrader.Upgrade(req.ResponseWriter, req.Request, nil)
+	inConn, err := upgrader.Upgrade(event.ResponseWriter, event.Req, nil)
 	if err != nil {
-		req.SendError("unable to negotiate a websocket upgrade: %v", err)
-		req.Body.Close()
+		event.SendError("unable to negotiate a websocket upgrade: %v", err)
+		event.Req.Body.Close()
 		return
 	}
 	defer inConn.Close()
 
-	req.Log("negotiated websocket upgrade, establishing outgoing connection")
+	event.Log("negotiated websocket upgrade, establishing outgoing connection")
 
 	wsURL := new(url.URL)
 	// copy all values from the request URL
-	*wsURL = *req.URL
+	*wsURL = *event.Req.URL
 
 	// apply forced host and scheme
-	if req.ForceHost != "" {
-		wsURL.Host = req.ForceHost
+	if event.ForceHost != "" {
+		wsURL.Host = event.ForceHost
 	}
 
-	if req.ForceScheme != "" {
-		wsURL.Scheme = req.ForceScheme
+	if event.ForceScheme != "" {
+		wsURL.Scheme = event.ForceScheme
 	}
 
 	// set websocket scheme
@@ -118,9 +118,9 @@ func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
 		wsURL.Scheme = "wss"
 	}
 
-	hdr := prepareWSHeader(req.Request.Header)
+	hdr := prepareWSHeader(event.Req.Header)
 
-	req.Log("connect to %v", wsURL)
+	event.Log("connect to %v", wsURL)
 
 	// remove the upgrade header field, it's re-added by the websocket library later
 	hdr.Del("upgrade")
@@ -128,20 +128,20 @@ func HandleUpgradeRequest(req *Request, clientConfig *tls.Config) {
 	var dialer = *websocket.DefaultDialer
 	dialer.TLSClientConfig = clientConfig
 
-	outConn, res, err := dialer.DialContext(req.Context(), wsURL.String(), hdr)
+	outConn, res, err := dialer.DialContext(event.Req.Context(), wsURL.String(), hdr)
 	if err != nil {
-		req.Log("connecting to %v failed: %v", wsURL, err)
+		event.Log("connecting to %v failed: %v", wsURL, err)
 		dumpResponse(res)
 		return
 	}
 
 	defer outConn.Close()
 
-	req.Log("established outogoing connection to %v", wsURL)
+	event.Log("established outogoing connection to %v", wsURL)
 
 	err = copyWSUntilError(inConn, outConn)
 	if err != nil {
-		req.Log("error copying messages: %v", err)
+		event.Log("error copying messages: %v", err)
 		return
 	}
 }
