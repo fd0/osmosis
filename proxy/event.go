@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 )
 
@@ -46,21 +45,40 @@ func newEvent(rw http.ResponseWriter, req *http.Request, logger *log.Logger, id 
 	}
 }
 
-// readBody returns the body as byte slice by reading
-// it it fully and replacing the original body ReadClose
-// with a NopCloser over the byte slice.
-func readBody(body *io.ReadCloser) []byte {
-	savedBody, _ := ioutil.ReadAll(*body)
+// readWithoutClose returns the content as byte slice by
+// reading it it fully and replacing the original body
+// ReadClose with a NopCloser over the byte slice.
+func readWithoutClose(body *io.ReadCloser) ([]byte, error) {
+	savedBody, err := ioutil.ReadAll(*body)
+	if err != nil {
+		return nil, fmt.Errorf("ReadAll: %v", err)
+	}
 	(*body).Close()
 	*body = ioutil.NopCloser(bytes.NewBuffer(savedBody))
-	return savedBody
+	return savedBody, nil
+}
+
+// RawRequest returns the raw request bytes in HTTP/1.1
+// wire format
+func (e *Event) RawRequest() ([]byte, error) {
+	// make sure that the body is a NopCloser
+	_, err := readWithoutClose(&e.Req.Body)
+	if err != nil {
+		return nil, fmt.Errorf("readWithoutClose: %v", err)
+	}
+	var dump *bytes.Buffer
+	err = e.Req.Write(dump)
+	if err != nil {
+		return nil, fmt.Errorf("writing request: %v", err)
+	}
+	return dump.Bytes(), nil
 }
 
 // RawRequestBody body returns the request body as a
 // byte slice leaving the original Body as an unread
 // io.NopCloser over the same bytes.
-func (e *Event) RawRequestBody() []byte {
-	return readBody(&e.Req.Body)
+func (e *Event) RawRequestBody() ([]byte, error) {
+	return readWithoutClose(&e.Req.Body)
 }
 
 // SetRequestBody sets the Body of the underlying event
@@ -69,14 +87,15 @@ func (e *Event) SetRequestBody(body []byte) {
 	e.Req.Body = ioutil.NopCloser(bytes.NewBuffer(body))
 }
 
-// RawRequest returns an approximation of the full request
-// as byte slice.
-func (e *Event) RawRequest() ([]byte, error) {
-	dump, err := httputil.DumpRequest(e.Req, true)
+// SetRequest sets the event's request to a new request
+// parsed from the provided byte slice
+func (e *Event) SetRequest(rawRequest []byte) error {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawRequest)))
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("ReadRequest: %v", err)
 	}
-	return dump, nil
+	e.Req = req
+	return nil
 }
 
 // Response is a regular http.Response with the ability to
@@ -88,8 +107,24 @@ type Response struct {
 // RawBody returns the response body as a byte slice leaving
 // the original Body as an unread io.NopCloser over the same
 // bytes.
-func (r *Response) RawBody() []byte {
-	return readBody(&r.Body)
+func (r *Response) RawBody() ([]byte, error) {
+	return readWithoutClose(&r.Body)
+}
+
+// Raw returns an approximation of the full response as byte
+// slice.
+func (r *Response) Raw() ([]byte, error) {
+	// make sure that the body is a NopCloser
+	_, err := readWithoutClose(&r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("readWithoutClose: %v", err)
+	}
+	var dump *bytes.Buffer
+	err = r.Write(dump)
+	if err != nil {
+		return nil, fmt.Errorf("writing response: %v", err)
+	}
+	return dump.Bytes(), nil
 }
 
 // SetBody sets the Body of the response to a NopCloser over
@@ -98,14 +133,16 @@ func (r *Response) SetBody(body []byte) {
 	r.Body = ioutil.NopCloser(bytes.NewBuffer(body))
 }
 
-// Raw returns an approximation of the full response as byte
-// slice.
-func (r *Response) Raw() ([]byte, error) {
-	dump, err := httputil.DumpResponse(r.Response, true)
+// Set replaces the response a new Response parsed from the
+// provided byte slice
+func (r *Response) Set(rawResponse []byte) error {
+	responseReader := bufio.NewReader(bytes.NewReader(rawResponse))
+	res, err := http.ReadResponse(responseReader, r.Request)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return dump, nil
+	*r = Response{Response: res}
+	return nil
 }
 
 func (e *Event) prepareRequest() error {
