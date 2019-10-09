@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 )
 
@@ -53,7 +54,10 @@ func readWithoutClose(body *io.ReadCloser) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ReadAll: %v", err)
 	}
-	(*body).Close()
+	err = (*body).Close()
+	if err != nil {
+		return nil, fmt.Errorf("closing body: %v", err)
+	}
 	*body = ioutil.NopCloser(bytes.NewBuffer(savedBody))
 	return savedBody, nil
 }
@@ -66,12 +70,11 @@ func (e *Event) RawRequest() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("readWithoutClose: %v", err)
 	}
-	var dump *bytes.Buffer
-	err = e.Req.Write(dump)
+	dump, err := httputil.DumpRequest(e.Req, true)
 	if err != nil {
 		return nil, fmt.Errorf("writing request: %v", err)
 	}
-	return dump.Bytes(), nil
+	return dump, nil
 }
 
 // RawRequestBody body returns the request body as a
@@ -119,12 +122,11 @@ func (r *Response) Raw() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("readWithoutClose: %v", err)
 	}
-	var dump *bytes.Buffer
-	err = r.Write(dump)
+	dump, err := httputil.DumpResponse(r.Response, true)
 	if err != nil {
 		return nil, fmt.Errorf("writing response: %v", err)
 	}
-	return dump.Bytes(), nil
+	return dump, nil
 }
 
 // SetBody sets the Body of the response to a NopCloser over

@@ -17,7 +17,7 @@ func TestSetRequest(t *testing.T) {
 			t.Fatalf("SetRequest with POST request failed: %v", err)
 		}
 		if e.Req.Method != http.MethodPost {
-			t.Errorf("Method mismatch (has `%s`, want `%s`)", e.Req.Method, http.MethodPost)
+			t.Errorf("Method mismatch (got `%s`, want `%s`)", e.Req.Method, http.MethodPost)
 		}
 	})
 
@@ -29,7 +29,7 @@ func TestSetRequest(t *testing.T) {
 			t.Fatalf("SetRequest with GET request failed: %v", err)
 		}
 		if e.Req.Method != http.MethodGet {
-			t.Errorf("Method mismatch (has `%s`, want `%s`)", e.Req.Method, http.MethodGet)
+			t.Errorf("Method mismatch (got `%s`, want `%s`)", e.Req.Method, http.MethodGet)
 		}
 	})
 }
@@ -43,7 +43,7 @@ func TestResponseSet(t *testing.T) {
 			t.Fatalf("setting response with body failed: %v", err)
 		}
 		if res.StatusCode != http.StatusOK {
-			t.Errorf("StatusCode mismatch (has `%d`, want `%d`)", res.StatusCode, http.StatusOK)
+			t.Errorf("StatusCode mismatch (got `%d`, want `%d`)", res.StatusCode, http.StatusOK)
 		}
 	})
 
@@ -55,7 +55,7 @@ func TestResponseSet(t *testing.T) {
 			t.Fatalf("setting response without body failed: %v", err)
 		}
 		if res.StatusCode != http.StatusNotFound {
-			t.Errorf("StatusCode mismatch (has `%d`, want `%d`)", res.StatusCode, http.StatusNotFound)
+			t.Errorf("StatusCode mismatch (got `%d`, want `%d`)", res.StatusCode, http.StatusNotFound)
 		}
 	})
 }
@@ -63,104 +63,140 @@ func TestResponseSet(t *testing.T) {
 func TestRawRequestBody(t *testing.T) {
 	t.Run("read post data", func(t *testing.T) {
 		e := dummyEvent()
-		e.SetRequest(mustReadFile("testdata/post_request"))
+		err := e.SetRequest(mustReadFile("testdata/post_request"))
+		if err != nil {
+			t.Fatalf("setting up event: %v", err)
+		}
 
 		want := []byte("field1=value1&field2=value2")
-		has, err := e.RawRequestBody()
+		got, err := e.RawRequestBody()
 		if err != nil {
 			t.Fatalf("RawRequestBody failed: %v", err)
 		}
-		if !bytes.Equal(want, has) {
-			t.Errorf("body mismatch (has `%s`, want `%s`)", has, want)
+		if !bytes.Equal(want, got) {
+			t.Errorf("body mismatch (got `%s`, want `%s`)", got, want)
 		}
 	})
 	t.Run("read multiple times", func(t *testing.T) {
 		e := dummyEvent()
-		e.SetRequest(mustReadFile("testdata/post_request"))
-
+		err := e.SetRequest(mustReadFile("testdata/post_request"))
+		if err != nil {
+			t.Fatalf("setting up event: %v", err)
+		}
 		want, err := e.RawRequestBody()
 		if err != nil {
 			t.Fatalf("RawRequestBody failed the first time: %v", err)
 		}
-		has, err := e.RawRequestBody()
+		got, err := e.RawRequestBody()
 		if err != nil {
 			t.Fatalf("RawRequestBody failed the second time: %v", err)
 		}
-		if !bytes.Equal(want, has) {
-			t.Errorf("body mismatch (has `%s`, want `%s`)", has, want)
+		if !bytes.Equal(want, got) {
+			t.Errorf("body mismatch (got `%s`, want `%s`)", got, want)
 		}
 	})
 	t.Run("read empty body", func(t *testing.T) {
 		e := dummyEvent()
-		e.SetRequest(mustReadFile("testdata/get_request"))
-
+		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		if err != nil {
+			t.Fatalf("setting up event: %v", err)
+		}
 		want := []byte("")
-		has, err := e.RawRequestBody()
+		got, err := e.RawRequestBody()
 		if err != nil {
 			t.Fatalf("RawRequestBody failed: %v", err)
 		}
-		if !bytes.Equal(want, has) {
-			t.Errorf("body mismatch (has `%s`, want `%s`)", has, want)
+		if !bytes.Equal(want, got) {
+			t.Errorf("body mismatch (got `%s`, want `%s`)", got, want)
 		}
 	})
 }
 
 func TestResponseRawBody(t *testing.T) {
 	t.Run("read full body", func(t *testing.T) {
-		e := dummyEvent()
-		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		res := Response{&http.Response{}}
+		err := res.Set(mustReadFile("testdata/response_with_body"))
 		if err != nil {
-			t.Fatalf("can't prepare request: %v", err)
+			t.Fatalf("setting up response: %v", err)
 		}
-		res := Response{&http.Response{Request: e.Req}}
-		res.Set(mustReadFile("testdata/response_with_body"))
 
 		want := []byte("<html>\r\n<body>\r\n<h1>Hello, World!</h1>\r\n</body>\r\n</html>\r\n")
-		has, err := res.RawBody()
+		got, err := res.RawBody()
 		if err != nil {
 			t.Fatalf("RawBody failed: %v", err)
 		}
-		if !bytes.Equal(want, has) {
-			t.Errorf("body mismatch (has `%s`, want `%s`)", has, want)
+		if !bytes.Equal(want, got) {
+			t.Errorf("body mismatch (got `%s`, want `%s`)", got, want)
 		}
 	})
 	t.Run("read multiple times", func(t *testing.T) {
-		e := dummyEvent()
-		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		res := Response{&http.Response{}}
+		err := res.Set(mustReadFile("testdata/response_with_body"))
 		if err != nil {
-			t.Fatalf("can't prepare request: %v", err)
+			t.Fatalf("setting up response: %v", err)
 		}
-		res := Response{&http.Response{Request: e.Req}}
-		res.Set(mustReadFile("testdata/response_with_body"))
 
 		want, err := res.RawBody()
 		if err != nil {
 			t.Fatalf("RawBody failed the first time: %v", err)
 		}
-		has, err := res.RawBody()
+		got, err := res.RawBody()
 		if err != nil {
 			t.Fatalf("RawBody failed the second time: %v", err)
 		}
-		if !bytes.Equal(want, has) {
-			t.Errorf("body mismatch (has `%s`, want `%s`)", has, want)
+		if !bytes.Equal(want, got) {
+			t.Errorf("body mismatch (got `%s`, want `%s`)", got, want)
 		}
 	})
 	t.Run("read empty body", func(t *testing.T) {
-		e := dummyEvent()
-		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		res := Response{&http.Response{}}
+		err := res.Set(mustReadFile("testdata/response_without_body"))
 		if err != nil {
-			t.Fatalf("can't prepare request: %v", err)
+			t.Fatalf("setting up response: %v", err)
 		}
-		res := Response{&http.Response{Request: e.Req}}
-		res.Set(mustReadFile("testdata/response_without_body"))
 
 		want := []byte("")
-		has, err := res.RawBody()
+		got, err := res.RawBody()
 		if err != nil {
 			t.Fatalf("RawBody failed: %v", err)
 		}
-		if !bytes.Equal(want, has) {
-			t.Errorf("body mismatch (has `%s`, want `%s`)", has, want)
+		if !bytes.Equal(want, got) {
+			t.Errorf("body mismatch (got `%s`, want `%s`)", got, want)
+		}
+	})
+}
+
+func TestSetRequestBody(t *testing.T) {
+	t.Run("adding body to GET request", func(t *testing.T) {
+		e := dummyEvent()
+		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		if err != nil {
+			t.Fatalf("setting up event: %v", err)
+		}
+		want := []byte("new GET request body")
+		e.SetRequestBody(want)
+		got, err := e.RawRequestBody()
+		if err != nil {
+			t.Fatalf("retrieving new GET request body: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("body mismatch (got `%s`, want `%s`)", got, want)
+		}
+	})
+	t.Run("replacing body in POST request", func(t *testing.T) {
+		e := dummyEvent()
+		err := e.SetRequest(mustReadFile("testdata/post_request"))
+		if err != nil {
+			t.Fatalf("setting up event: %v", err)
+		}
+		want := []byte("replaced POST request body")
+		e.SetRequestBody(want)
+		got, err := e.RawRequestBody()
+		if err != nil {
+			t.Fatalf("retrieving new POST request body: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("body mismatch (got `%s`, want `%s`)", got, want)
 		}
 	})
 }

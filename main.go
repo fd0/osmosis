@@ -13,6 +13,7 @@ import (
 
 	"github.com/fd0/osmosis/certauth"
 	"github.com/fd0/osmosis/proxy"
+	"github.com/fd0/osmosis/proxy/hooks"
 	"github.com/spf13/pflag"
 )
 
@@ -85,21 +86,13 @@ func main() {
 
 	p := proxy.New(opts.Listen, ca, nil, nil)
 
-	// Event logging demo
-	p.Register(func(event *proxy.Event) (*proxy.Response, error) {
-		res, err := event.ForwardRequest()
-		if err != nil {
-			return nil, err
-		}
-		event.Log("%v %v %v %v\n", res.StatusCode, event.Req.Method, event.Req.URL, event.Req.Proto)
-		return res, err
-	})
-
-	// Header reqrite demo
+	p.Register(hooks.DumpToLog(true, false), hooks.RemoveCompression)
+	// Header rewrite demo
 	p.Register(func(event *proxy.Event) (*proxy.Response, error) {
 		event.Req.Header["User-Agent"] = []string{"Osmosis Proxy"}
 		return event.ForwardRequest()
 	})
+	p.Register(hooks.DumpToLog(false, true), hooks.LogCompleteRequest)
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Printf("CA loaded: %v\n", ca.Certificate.Subject)
