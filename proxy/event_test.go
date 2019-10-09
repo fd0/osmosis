@@ -107,10 +107,15 @@ func TestRawRequestBody(t *testing.T) {
 
 func TestResponseRawBody(t *testing.T) {
 	t.Run("read full body", func(t *testing.T) {
-		res := &Response{&http.Response{}}
+		e := dummyEvent()
+		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		if err != nil {
+			t.Fatalf("can't prepare request: %v", err)
+		}
+		res := Response{&http.Response{Request: e.Req}}
 		res.Set(mustReadFile("testdata/response_with_body"))
 
-		want := []byte("<html>\n<body>\n<h1>Hello, World!</h1>\n</body>\n</html>\n\n")
+		want := []byte("<html>\r\n<body>\r\n<h1>Hello, World!</h1>\r\n</body>\r\n</html>\r\n")
 		has, err := res.RawBody()
 		if err != nil {
 			t.Fatalf("RawBody failed: %v", err)
@@ -120,7 +125,12 @@ func TestResponseRawBody(t *testing.T) {
 		}
 	})
 	t.Run("read multiple times", func(t *testing.T) {
-		res := &Response{&http.Response{}}
+		e := dummyEvent()
+		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		if err != nil {
+			t.Fatalf("can't prepare request: %v", err)
+		}
+		res := Response{&http.Response{Request: e.Req}}
 		res.Set(mustReadFile("testdata/response_with_body"))
 
 		want, err := res.RawBody()
@@ -136,7 +146,12 @@ func TestResponseRawBody(t *testing.T) {
 		}
 	})
 	t.Run("read empty body", func(t *testing.T) {
-		res := &Response{&http.Response{}}
+		e := dummyEvent()
+		err := e.SetRequest(mustReadFile("testdata/get_request"))
+		if err != nil {
+			t.Fatalf("can't prepare request: %v", err)
+		}
+		res := Response{&http.Response{Request: e.Req}}
 		res.Set(mustReadFile("testdata/response_without_body"))
 
 		want := []byte("")
