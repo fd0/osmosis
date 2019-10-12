@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -12,6 +13,11 @@ import (
 	"net/http/httputil"
 	"strings"
 )
+
+// ErrNoForwardAction is thrown by the default value of the
+// ForwardRequest function. This error is thrown if source of
+// the event fails to set a suitable ForwardRequest function.
+var ErrNoForwardAction = errors.New("no forward action defined")
 
 // Event represents the event of an incoming request into the proxy.
 // In addition to the request itself, the event contains the proxy
@@ -39,7 +45,7 @@ func newEvent(rw http.ResponseWriter, req *http.Request, logger *log.Logger, id 
 		Req:            req,
 		ResponseWriter: rw,
 		ForwardRequest: func() (*Response, error) {
-			return nil, fmt.Errorf("no forward action defined")
+			return nil, ErrNoForwardAction
 		},
 		Abort:  func() {},
 		Logger: logger,
