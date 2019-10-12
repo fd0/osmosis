@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -73,7 +73,7 @@ func newHTTPClient(enableHTTP2 bool, cfg *tls.Config) *http.Client {
 func New(address string, ca *certauth.CertificateAuthority, clientConfig *tls.Config,
 	logWriter io.Writer) *Proxy {
 	if logWriter == nil {
-		logWriter = os.Stdout
+		logWriter = ioutil.Discard
 	}
 	logger := log.New(logWriter, "", log.Ldate|log.Ltime|log.Lmicroseconds)
 	proxy := &Proxy{
