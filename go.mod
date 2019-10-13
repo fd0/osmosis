@@ -3,6 +3,7 @@ module github.com/fd0/osmosis
 go 1.12
 
 require (
+	github.com/d5/tengo v1.24.3
 	github.com/dgraph-io/badger v1.5.5
 	github.com/gorilla/websocket v1.4.0
 	github.com/pkg/errors v0.8.1

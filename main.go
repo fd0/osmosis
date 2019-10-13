@@ -84,15 +84,24 @@ func main() {
 		}()
 	}
 
-	p := proxy.New(opts.Listen, ca, nil, nil)
+	p := proxy.New(opts.Listen, ca, nil, os.Stdout)
 
-	p.Register(hooks.DumpToLog(true, false), hooks.RemoveCompression)
+	preScriptHook, err := hooks.CompileTengoPreHookFile("pre.tengo")
+	if err != nil {
+		log.Fatal(err)
+	}
+	postScriptHook, err := hooks.CompileTengoPostHookFile("post.tengo")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	p.Register(preScriptHook, hooks.RemoveCompression)
 	// Header rewrite demo
 	p.Register(func(event *proxy.Event) (*proxy.Response, error) {
 		event.Req.Header["User-Agent"] = []string{"Osmosis Proxy"}
 		return event.ForwardRequest()
 	})
-	p.Register(hooks.DumpToLog(false, true), hooks.LogCompleteRequest)
+	p.Register(hooks.LogCompleteRequest, postScriptHook)
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Printf("CA loaded: %v\n", ca.Certificate.Subject)

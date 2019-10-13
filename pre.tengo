@@ -1,0 +1,3 @@
+text := import("text")
+
+request = text.replace(request, "Osmosis", "Tengo", -1)
