@@ -68,6 +68,9 @@ func TestSetRequest(t *testing.T) {
 		if e.Req.Method != http.MethodPost {
 			t.Errorf("Method mismatch (got `%s`, want `%s`)", e.Req.Method, http.MethodPost)
 		}
+		if e.Req.RequestURI != "" {
+			t.Errorf("client request cannot have RequestURI set")
+		}
 	})
 
 	t.Run("GET", func(t *testing.T) {
@@ -79,6 +82,9 @@ func TestSetRequest(t *testing.T) {
 		}
 		if e.Req.Method != http.MethodGet {
 			t.Errorf("Method mismatch (got `%s`, want `%s`)", e.Req.Method, http.MethodGet)
+		}
+		if e.Req.RequestURI != "" {
+			t.Errorf("client request cannot have RequestURI set")
 		}
 	})
 }

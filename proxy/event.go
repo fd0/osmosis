@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 )
 
@@ -100,6 +101,15 @@ func (e *Event) SetRequestBody(body []byte) {
 // parsed from the provided byte slice
 func (e *Event) SetRequest(rawRequest []byte) error {
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(rawRequest)))
+
+	// RequestURI can't be set for client requests
+	req.RequestURI = ""
+	// recover the protocl from the original request, but update Host and URL
+	req.URL, err = url.Parse(fmt.Sprintf("%s://%s%s", e.Req.URL.Scheme, req.Host, req.URL))
+	if err != nil {
+		return fmt.Errorf("parsing reconstructed URL: %v", err)
+	}
+
 	if err != nil {
 		return fmt.Errorf("ReadRequest: %v", err)
 	}
